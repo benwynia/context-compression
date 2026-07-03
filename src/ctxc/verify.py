@@ -22,7 +22,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from .aic import DEFAULT_RATE, AicRate, aic_for, usd_for
-from .compressor import CompressConfig
+from .compressor import BudgetImpossible, CompressConfig
 from .models import Message, head_len, validate_chain
 from .session import SessionCompressor
 from .tokens import TokenCounter
@@ -89,9 +89,14 @@ def verify_session(
         if msg.get("role") != "assistant" or i == 0:
             continue
         prefix = messages[:i]
-        emitted = sc.request(prefix)
         turn = report.turns
         report.turns += 1
+        try:
+            emitted = sc.request(prefix)
+        except BudgetImpossible as e:
+            # an explicit compressor failure is a finding, not a harness crash
+            report.violations.append(f"turn {turn}: budget impossible: {e}")
+            continue
 
         checkpoints = getattr(sc, "checkpoints", 0)
         is_checkpoint = checkpoints > prev_checkpoints

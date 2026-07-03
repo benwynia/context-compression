@@ -41,8 +41,14 @@ class SessionCompressor:
         n = len(self._source)
         return len(history) >= n and history[:n] == self._source
 
-    def request(self, history: list[Message]) -> list[Message]:
-        """Map the client's full history to the chain to send upstream."""
+    def request(self, history: list[Message], budget: int | None = None) -> list[Message]:
+        """Map the client's full history to the chain to send upstream.
+
+        ``budget`` overrides the session budget for this request — used by the
+        proxy to subtract the request's ``tools`` schema tokens, which occupy
+        the same context window the messages do.
+        """
+        budget = self.budget if budget is None else budget
         if self._source and self._is_append_only(history):
             tail = [dict(m) for m in history[len(self._source):]]
             candidate = self._emitted + tail
@@ -51,13 +57,13 @@ class SessionCompressor:
                 self._emitted = []
             candidate = [dict(m) for m in history]
 
-        if self.counter.count_chain(candidate) > self.budget:
-            target = max(1, int(self.budget * self.config.recompress_to))
+        if self.counter.count_chain(candidate) > budget:
+            target = max(1, int(budget * self.config.recompress_to))
             try:
                 result = compress(candidate, target, self.config, self.counter)
             except BudgetImpossible:
                 # hysteresis target unreachable — the hard cap is what matters
-                result = compress(candidate, self.budget, self.config, self.counter)
+                result = compress(candidate, budget, self.config, self.counter)
             candidate = result.messages
             self.checkpoints += 1
 

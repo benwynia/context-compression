@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 
 import httpx
@@ -49,10 +50,11 @@ def build_app(
     config: CompressConfig | None = None,
     client: httpx.AsyncClient | None = None,
     counter: TokenCounter | None = None,
+    max_sessions: int = 256,
 ) -> Starlette:
     upstream = upstream.rstrip("/")
     counter = counter or TokenCounter()
-    sessions: dict[str, SessionCompressor] = {}
+    sessions: OrderedDict[str, SessionCompressor] = OrderedDict()
     owns_client = client is None
     http = client or httpx.AsyncClient(timeout=120.0)
 
@@ -65,13 +67,32 @@ def build_app(
         if not isinstance(messages, list):
             return JSONResponse({"error": "missing messages"}, status_code=400)
 
+        # tools schemas share the context window with the messages: they count
+        # against the same budget, or a "60k budget" would overshoot the cap.
+        tools_tokens = 0
+        if body.get("tools"):
+            tools_tokens = counter.count_text(
+                json.dumps(body["tools"], ensure_ascii=False, sort_keys=True)
+            )
+        effective_budget = budget - tools_tokens
+        if effective_budget <= 0:
+            return JSONResponse(
+                {"error": {"type": "ctxc_budget_impossible",
+                           "message": f"tools schemas alone are {tools_tokens} tokens, "
+                                      f"budget is {budget}"}},
+                status_code=400,
+            )
+
         key = _session_key(request, messages)
         sc = sessions.get(key)
         if sc is None:
             sc = sessions[key] = SessionCompressor(budget, config=config, counter=counter)
+            while len(sessions) > max_sessions:  # LRU: drop the stalest session
+                sessions.popitem(last=False)
+        sessions.move_to_end(key)
         original_tokens = counter.count_chain(messages)
         try:
-            emitted = sc.request(messages)
+            emitted = sc.request(messages, budget=effective_budget)
         except BudgetImpossible as e:
             return JSONResponse(
                 {"error": {"type": "ctxc_budget_impossible", "message": str(e)}},
@@ -83,8 +104,10 @@ def build_app(
             k: v for k, v in request.headers.items() if k.lower() not in _HOP_BY_HOP
         }
         path = request.url.path
-        if not path.startswith("/v1"):
+        if not path.startswith("/v1") and not upstream.endswith("/v1"):
             path = "/v1" + path
+        elif path.startswith("/v1") and upstream.endswith("/v1"):
+            path = path[len("/v1"):]
         resp = await http.post(f"{upstream}{path}", json=body, headers=fwd_headers)
 
         out_headers = {

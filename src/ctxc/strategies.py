@@ -119,6 +119,9 @@ def build_digest_message(
         while kept and counter.count_text("\n".join(kept)) > token_cap and len(kept) > 1:
             kept.pop(0)
             dropped += 1
+        if kept and counter.count_text(kept[0]) > token_cap:
+            # a single line can still exceed the cap — hard-cut, never overshoot
+            kept[0], _ = truncate_text(kept[0], max(80, token_cap * 3))
         if dropped:
             kept.insert(0, f"(… {dropped} earlier rounds elided …)")
         body = "\n".join(kept)
