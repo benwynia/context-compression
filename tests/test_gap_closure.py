@@ -226,8 +226,10 @@ def test_smoke_sends_valid_compressed_chain():
     assert result["compressed_tokens"] <= 800 < result["original_tokens"]
     # the request must exercise the shapes we need providers to accept
     assert result["shapes_exercised"]["truncation_marker"]
+    assert result["shapes_exercised"]["digest_message"]
     assert validate_chain(sent[0]["messages"]) == []
     assert sent[0]["tools"]
+    assert "max_completion_tokens" in sent[0]  # newer-dialect first
     assert result["reply"] == "ok"
 
 

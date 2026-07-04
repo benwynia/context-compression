@@ -38,12 +38,15 @@ _TOOLS = [
 def _session() -> list[dict]:
     """A tiny agent session with enough bulk that compress() at a small budget
     exercises truncation AND eviction+digest — the shapes we need accepted."""
-    filler = "line of log output about retries and backoff timing\n" * 120
     msgs: list[dict] = [
         {"role": "system", "content": "You are a coding agent. Be terse."},
         {"role": "user", "content": "Fix the retry logic in the payments client."},
     ]
-    for n in range(4):
+    # distinct per-round content (so dedupe can't collapse it) and enough
+    # rounds that truncation alone can't meet the default budget — eviction
+    # must fire, so the digest message shape is exercised against the provider
+    for n in range(10):
+        filler = f"pay_{n} log: retry attempt backoff timing entry {n}\n" * 120
         msgs.append(
             {
                 "role": "assistant",
@@ -91,16 +94,19 @@ def run_smoke(
     if key:
         headers["authorization"] = f"Bearer {key}"
     http = client or httpx.Client(timeout=60.0)
-    resp = http.post(
-        f"{base}/chat/completions",
-        json={
-            "model": model,
-            "max_tokens": 8,
-            "messages": res.messages,
-            "tools": _TOOLS,
-        },
-        headers=headers,
-    )
+    body = {
+        "model": model,
+        # newer OpenAI models take max_completion_tokens; older ones and most
+        # OpenAI-compatible servers take max_tokens — try new, fall back
+        "max_completion_tokens": 16,
+        "messages": res.messages,
+        "tools": _TOOLS,
+    }
+    resp = http.post(f"{base}/chat/completions", json=body, headers=headers)
+    if resp.status_code == 400 and "max_completion_tokens" in resp.text:
+        body.pop("max_completion_tokens")
+        body["max_tokens"] = 16
+        resp = http.post(f"{base}/chat/completions", json=body, headers=headers)
     out = {
         "status": resp.status_code,
         "ok": resp.status_code == 200,
