@@ -11,9 +11,38 @@ spend on a haiku-class model, plus a few hours of wall time.
 
 - Linux or macOS, Python ≥ 3.11
 - [uv](https://docs.astral.sh/uv/): `curl -LsSf https://astral.sh/uv/install.sh | sh`
-- **Docker** (SWE-bench's grader runs each repo's tests in containers)
+- **Docker — for the grading step only** (see "No Docker?" below; nothing in
+  ctxc itself uses containers)
 - Your model provider API key (exported as e.g. `OPENAI_API_KEY`)
 - Only for B2: [Ollama](https://ollama.com) — `ollama pull qwen2.5:7b`
+
+### No Docker?
+
+Docker appears in exactly one step: SWE-bench's official grader (step 5),
+which applies the agent's patch and runs each repo's test suite. That
+container is the **sandbox for model-generated code** — dropping it moves the
+risk somewhere else rather than deleting it. Options, most-recommended first:
+
+1. **Rootless Podman.** Daemonless, runs as an unprivileged user, and exposes
+   a Docker-compatible socket (`podman system service`; set
+   `DOCKER_HOST=unix://$XDG_RUNTIME_DIR/podman/podman.sock`). The SWE-bench
+   harness generally works unmodified, and security teams that reject the
+   Docker daemon often accept rootless Podman.
+2. **Grade in CI.** Run steps 1–4 (proxies + agent) anywhere with no
+   containers, commit `preds.jsonl`, and let an ephemeral CI runner (GitHub
+   Actions etc.) execute the grading job. Your organization already accepts
+   CI running arbitrary repo code in throwaway environments — this is the
+   same trust boundary. The `ctxc resolve` / `ctxc ab` steps consume the
+   grader's output file wherever it was produced.
+3. **A throwaway VM** dedicated to grading, wiped afterwards.
+4. **Swap the benchmark.** Aider's polyglot benchmark can grade in local
+   venvs — no containers, but model-generated code then runs directly on the
+   host, and its sessions are mostly too short to engage compression. Only
+   reasonable as a does-no-harm check, on a sacrificial machine.
+
+Note the split: **arms A/B/B2, the proxies, cost capture, and the live
+engineer trial need no containers at all.** Docker (or its substitute) is
+confined to the offline grading of benchmark predictions.
 
 ## 1. Install ctxc and sanity-check it
 

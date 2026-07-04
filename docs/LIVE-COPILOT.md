@@ -85,4 +85,6 @@ restart the proxy with `--passthrough`. Nothing else was changed.
 
 Deployment notes: keep the proxy on localhost (it adds no auth of its own);
 one uvicorn worker (session state is in-memory); a proxy restart just costs
-one extra recompression per live conversation.
+one extra recompression per live conversation. **No Docker or containers
+anywhere in this trial** — the proxy is a plain Python process installed with
+uv; the only external processes are your editor and (optionally) Ollama.
