@@ -136,3 +136,10 @@ lower `--budget` and rerun.
 Read `docs/AB-TESTING.md` before quoting results — it lists the pitfalls that
 invalidate runs (post-hoc task selection, dropping infra failures from one arm
 only, excluding context-cap deaths).
+
+## Dry-run example
+
+`examples/ab_dryrun_driver.py` is the ~$0.01 live pipeline test: a real
+tool-calling agent on two planted-bug tasks through all three arms, graded
+objectively, then `ctxc scrape`/`resolve`/`ab`. Run it before spending real
+money on the full benchmark — it validates every moving part.
