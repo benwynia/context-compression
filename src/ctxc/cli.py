@@ -85,6 +85,10 @@ def main(argv: list[str] | None = None) -> int:
     pp.add_argument("--shadow", action="store_true",
                     help="forward requests UNTOUCHED; measure would-be savings on "
                          "the side (zero-risk pilot; read them at GET /stats)")
+    pp.add_argument("--passthrough", action="store_true",
+                    help="no compression at all — measurement/recording only. "
+                         "Use for the A/B CONTROL arm so both arms share "
+                         "identical instrumentation")
     pp.add_argument("--record", default=None, metavar="DIR",
                     help="capture each conversation as a replayable session file "
                          "for `ctxc verify`")
@@ -156,8 +160,12 @@ def main(argv: list[str] | None = None) -> int:
 
         from .proxy import build_app
 
-        app = build_app(args.upstream, budget, shadow=args.shadow, record_dir=args.record)
-        mode = "SHADOW (traffic untouched, measuring only)" if args.shadow else "ACTIVE"
+        app = build_app(args.upstream, budget, shadow=args.shadow,
+                        passthrough=args.passthrough, record_dir=args.record)
+        mode = ("PASSTHROUGH (control arm: no compression, measuring only)"
+                if args.passthrough
+                else "SHADOW (traffic untouched, measuring only)" if args.shadow
+                else "ACTIVE")
         print(f"ctxc proxy: {mode}; savings at http://{args.host}:{args.port}/stats",
               file=sys.stderr)
         uvicorn.run(app, host=args.host, port=args.port)

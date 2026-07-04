@@ -107,7 +107,9 @@ Do **not** quote the demo's percentage — it is measured on synthetic data. The
 kit for measuring on *your* traffic, in increasing order of rigor:
 
 1. **Shadow mode (zero risk).** `ctxc proxy --upstream URL --budget 60k
-   --shadow --record ./sessions`. Traffic is forwarded **untouched**; the
+   --shadow --record ./sessions`. (There is also `--passthrough` — no
+   compression at all, measurement only — used as the A/B control arm so both
+   arms share identical instrumentation.) Traffic is forwarded **untouched**; the
    would-be savings are measured on the side and aggregated at `GET /stats`
    (including the upstream's own reported `usage` — provider-billed numbers,
    not tiktoken estimates, and the real cache-hit rate). Compression failures

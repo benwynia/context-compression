@@ -3,15 +3,30 @@
 The claim under test: *routing an agent through ctxc reduces cost without
 reducing task success.* Both halves need numbers. This is the protocol.
 
+## Which comparison
+
+**A = uncompressed control, B = ctxc (deterministic compression).** The control
+is the world you'd live in without the tool — agents hitting the model with
+full context. That's the decision-relevant baseline.
+
+Comparing against third-party compression proxies (condense, headroom) is
+explicitly **out of scope**: it answers "should we buy their product" (already
+decided: no), it requires paying for and routing traffic through their
+services to even run, and the published minmax-bench reference runs already
+give cost-only context for them (with significant caveats — synthetic-baseline
+tokenization and survivorship bias in the deep buckets).
+
 ## Design
 
-Two arms, **one variable**:
+Two arms, **one variable**. Both arms run through the SAME proxy binary so
+instrumentation, recording, and the extra network hop are identical — only
+compression differs:
 
-| | ctxc arm | control arm |
+| | ctxc arm (B) | control arm (A) |
 |---|---|---|
 | agent harness | identical, pinned version | identical, pinned version |
 | model + params | identical (temperature 0 where supported) | identical |
-| base URL | `http://localhost:8790` (ctxc proxy, **active** mode) | provider endpoint directly |
+| base URL | `ctxc proxy` in **active** mode | `ctxc proxy` in **`--passthrough`** mode (no compression, measurement only) |
 
 Outcomes, all objective:
 
@@ -47,10 +62,13 @@ litellm-based — set the api_base to the proxy).
 
 ## Procedure
 
-1. **Start the proxy for the ctxc arm** (one proxy per arm run):
+1. **Start one proxy per arm:**
 
    ```bash
+   # arm B (compressed):
    ctxc proxy --upstream $PROVIDER_URL --budget 60k --record ./runs/ctxc/sessions --port 8790
+   # arm A (control — identical instrumentation, no compression):
+   ctxc proxy --upstream $PROVIDER_URL --budget 60k --passthrough --record ./runs/control/sessions --port 8791
    ```
 
 2. **Run each task with a per-task session id** so cost attributes cleanly.
@@ -73,10 +91,9 @@ litellm-based — set the api_base to the proxy).
     "cache_read": 1520000, "cache_write": 310042, "checkpoints": 3}
    ```
 
-   Write one such `*.json` per task into `runs/ctxc/results/`. For the control
-   arm, take usage from the provider's responses (or run the proxy with a huge
-   `--budget` so it never compresses — then `/stats/sessions` works identically
-   and `checkpoints` stays 0).
+   Write one such `*.json` per task into `runs/ctxc/results/` and
+   `runs/control/results/` — both arms' `/stats/sessions` have the identical
+   shape (the control arm's `checkpoints` is always 0, `emitted == original`).
 
 4. **Grade with the benchmark's official harness** (e.g. `swebench` evaluate)
    — the `resolved` field must come from there, nowhere else.

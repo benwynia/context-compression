@@ -6,13 +6,17 @@ to the upstream.
 
     ctxc proxy --upstream https://api.example.com --budget 60000 --port 8790
 
-Two modes:
+Three modes:
 
 * **active** (default) — the compressed chain is what goes upstream.
 * **shadow** (``--shadow``) — the ORIGINAL request goes upstream untouched;
   compression runs on the side and its would-be savings are recorded. Zero
   behavior change, real traffic, real numbers: run this first, quote the
   measured percentage, then flip to active.
+* **passthrough** (``--passthrough``) — no compression at all, measurement and
+  recording only. This is the A/B *control arm*: both arms get the identical
+  proxy hop, recording, and per-task stats, so the only variable left is
+  compression itself.
 
 Sessions are keyed by the ``x-ctxc-session-id`` header when present, else by a
 hash of the chain's first message (stable across turns; concurrent
@@ -91,8 +95,12 @@ def build_app(
     counter: TokenCounter | None = None,
     max_sessions: int = 256,
     shadow: bool = False,
+    passthrough: bool = False,
     record_dir: str | Path | None = None,
 ) -> Starlette:
+    if shadow and passthrough:
+        raise ValueError("shadow and passthrough are mutually exclusive modes")
+    mode = "passthrough" if passthrough else ("shadow" if shadow else "active")
     upstream = upstream.rstrip("/")
     counter = counter or TokenCounter()
     sessions: OrderedDict[str, tuple[SessionCompressor, asyncio.Lock]] = OrderedDict()
@@ -140,7 +148,7 @@ def build_app(
         # against the same budget, or a "60k budget" would overshoot the cap.
         tools_tokens = tools_token_count(counter, body["tools"]) if body.get("tools") else 0
         effective_budget = budget - tools_tokens
-        if effective_budget <= 0 and not shadow:
+        if effective_budget <= 0 and mode == "active":
             return JSONResponse(
                 {"error": {"type": "ctxc_budget_impossible",
                            "message": f"tools schemas alone are {tools_tokens} tokens, "
@@ -165,30 +173,34 @@ def build_app(
         _record(key, messages)
 
         emitted = None
-        try:
-            # compression is CPU-bound (tokenizing + escalation ladder): run it
-            # off the event loop so one big checkpoint doesn't stall every other
-            # in-flight session; the per-session lock keeps sc state sequential.
-            async with lock:
-                original_tokens, emitted = await asyncio.to_thread(
-                    lambda: (
-                        counter.count_chain(messages),
-                        sc.request(messages, budget=max(1, effective_budget)),
+        if passthrough:
+            original_tokens = await asyncio.to_thread(counter.count_chain, messages)
+        else:
+            try:
+                # compression is CPU-bound (tokenizing + escalation ladder): run
+                # it off the event loop so one big checkpoint doesn't stall every
+                # other in-flight session; the per-session lock keeps sc state
+                # sequential.
+                async with lock:
+                    original_tokens, emitted = await asyncio.to_thread(
+                        lambda: (
+                            counter.count_chain(messages),
+                            sc.request(messages, budget=max(1, effective_budget)),
+                        )
                     )
-                )
-        except BudgetImpossible as e:
-            if not shadow:
-                return JSONResponse(
-                    {"error": {"type": "ctxc_budget_impossible", "message": str(e)}},
-                    status_code=400,
-                )
-            # shadow must be zero-risk: log the failure, forward the original
-            stats["compress_errors"] += 1
-            per["compress_errors"] += 1
-            original_tokens = counter.count_chain(messages)
+            except BudgetImpossible as e:
+                if not shadow:
+                    return JSONResponse(
+                        {"error": {"type": "ctxc_budget_impossible", "message": str(e)}},
+                        status_code=400,
+                    )
+                # shadow must be zero-risk: log the failure, forward the original
+                stats["compress_errors"] += 1
+                per["compress_errors"] += 1
+                original_tokens = counter.count_chain(messages)
 
         emitted_tokens = counter.count_chain(emitted) if emitted is not None else None
-        if not shadow and emitted is not None:
+        if mode == "active" and emitted is not None:
             body["messages"] = emitted
 
         fwd_headers = {
@@ -223,7 +235,7 @@ def build_app(
             for k, v in resp.headers.items()
             if k.lower() not in _HOP_BY_HOP and k.lower() != "content-encoding"
         }
-        out_headers["x-ctxc-mode"] = "shadow" if shadow else "active"
+        out_headers["x-ctxc-mode"] = mode
         out_headers["x-ctxc-original-tokens"] = str(original_tokens)
         if emitted_tokens is not None:
             out_headers["x-ctxc-emitted-tokens"] = str(emitted_tokens)
@@ -238,22 +250,22 @@ def build_app(
         o, e = stats["original_tokens"], stats["emitted_tokens"]
         return JSONResponse(
             {
-                "mode": "shadow" if shadow else "active",
+                "mode": mode,
                 "sessions": len(sessions),
                 **stats,
                 "saved_tokens": o - e,
                 "saved_pct": round(100.0 * (o - e) / o, 2) if o else 0.0,
-                # in shadow mode upstream_* is the real BASELINE spend; in
-                # active mode it is the real COMPRESSED spend (provider-billed)
-                "upstream_usage_is": "baseline" if shadow else "compressed",
+                # in shadow/passthrough the upstream sees the ORIGINAL chain, so
+                # upstream_* is the real BASELINE spend; in active mode it is
+                # the real COMPRESSED spend (provider-billed)
+                "upstream_usage_is": "compressed" if mode == "active" else "baseline",
             }
         )
 
     async def session_stats_view(_: Request) -> Response:
         """Per-session (= per-task) attribution for A/B runs: scrape after each
         task, keyed by the x-ctxc-session-id you drove the task with."""
-        return JSONResponse({"mode": "shadow" if shadow else "active",
-                             "sessions": session_stats})
+        return JSONResponse({"mode": mode, "sessions": session_stats})
 
     @asynccontextmanager
     async def lifespan(_: Starlette):
