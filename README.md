@@ -137,6 +137,14 @@ measures where), from **request-metered billing** (savings show up as context
 headroom, not credits), and from **sessions that outlive the model's context
 cap** — where the uncompressed baseline doesn't cost more, it simply dies.
 
+4. **A/B test on a real benchmark.** The end-state proof — cost *and* task
+   completion, paired per task on SWE-bench Verified (or Terminal-Bench):
+   run the agent through the proxy vs direct, join grader verdicts with
+   `GET /stats/sessions` cost rows, then `ctxc ab ctxc_results/
+   control_results/` for resolved rates, an exact McNemar test, cost deltas
+   with bootstrap CIs, and the compression-engaged segment. Full protocol in
+   [docs/AB-TESTING.md](docs/AB-TESTING.md).
+
 ## Known limitations
 
 - **Quality is not measured.** The harness proves compression is structurally

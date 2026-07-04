@@ -70,6 +70,13 @@ def main(argv: list[str] | None = None) -> int:
     pd.add_argument("--rounds", type=int, default=40)
     pd.add_argument("--model-cap", default="50k")
 
+    pa = sub.add_parser("ab", help="paired A/B report: ctxc arm vs control arm")
+    pa.add_argument("ctxc_results", help="dir of *.json rows (or .jsonl) for the ctxc arm")
+    pa.add_argument("control_results", help="dir of *.json rows (or .jsonl) for the control arm")
+    pa.add_argument("--rates", help="JSON AIC rates file")
+    pa.add_argument("--model", help="model name to look up in --rates")
+    pa.add_argument("--json", dest="json_out", help="also write the full report as JSON")
+
     pp = sub.add_parser("proxy", help="run the live compression proxy")
     pp.add_argument("--upstream", required=True)
     pp.add_argument("--budget", default="60k")
@@ -83,7 +90,7 @@ def main(argv: list[str] | None = None) -> int:
                          "for `ctxc verify`")
 
     args = p.parse_args(argv)
-    budget = _parse_budget(args.budget)
+    budget = _parse_budget(args.budget) if hasattr(args, "budget") else 0
 
     if args.cmd == "compress":
         messages = _load_messages(args.session)
@@ -129,6 +136,20 @@ def main(argv: list[str] | None = None) -> int:
         report = verify_session(messages, budget, counter=counter, model_cap=cap)
         print(render_report(report))
         return 0 if report.ok else 1
+
+    if args.cmd == "ab":
+        from dataclasses import asdict
+
+        from .ab import compare, load_results, render_ab
+
+        report = compare(
+            load_results(args.ctxc_results), load_results(args.control_results),
+            rate=_rate(args),
+        )
+        print(render_ab(report))
+        if args.json_out:
+            Path(args.json_out).write_text(json.dumps(asdict(report), indent=2))
+        return 0
 
     if args.cmd == "proxy":
         import uvicorn

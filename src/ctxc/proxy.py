@@ -111,6 +111,11 @@ def build_app(
         "upstream_completion_tokens": 0,
         "upstream_cached_tokens": 0,
     }
+    # per-session (= per-task in an A/B run) attribution; evicted with the LRU
+    session_stats: dict[str, dict] = {}
+
+    def _fresh_session_stats() -> dict:
+        return {k: 0 for k in stats} | {"checkpoints": 0}
 
     def _record(key: str, messages: list) -> None:
         """Each request carries the FULL history, so overwriting with the latest
@@ -150,10 +155,13 @@ def build_app(
                 SessionCompressor(budget, config=config, counter=counter),
                 asyncio.Lock(),
             )
+            session_stats[key] = _fresh_session_stats()
             while len(sessions) > max_sessions:  # LRU: drop the stalest session
-                sessions.popitem(last=False)
+                dropped, _ = sessions.popitem(last=False)
+                session_stats.pop(dropped, None)
         sessions.move_to_end(key)
         sc, lock = entry
+        per = session_stats[key]
         _record(key, messages)
 
         emitted = None
@@ -176,6 +184,7 @@ def build_app(
                 )
             # shadow must be zero-risk: log the failure, forward the original
             stats["compress_errors"] += 1
+            per["compress_errors"] += 1
             original_tokens = counter.count_chain(messages)
 
         emitted_tokens = counter.count_chain(emitted) if emitted is not None else None
@@ -196,12 +205,18 @@ def build_app(
         resp = await http.post(url, json=body, headers=fwd_headers)
 
         usage = _usage_from(resp.content)
-        stats["requests"] += 1
-        stats["original_tokens"] += original_tokens
-        stats["emitted_tokens"] += emitted_tokens if emitted_tokens is not None else original_tokens
-        stats["upstream_prompt_tokens"] += usage["prompt_tokens"]
-        stats["upstream_completion_tokens"] += usage["completion_tokens"]
-        stats["upstream_cached_tokens"] += usage["cached_tokens"]
+        increments = {
+            "requests": 1,
+            "original_tokens": original_tokens,
+            "emitted_tokens": emitted_tokens if emitted_tokens is not None else original_tokens,
+            "upstream_prompt_tokens": usage["prompt_tokens"],
+            "upstream_completion_tokens": usage["completion_tokens"],
+            "upstream_cached_tokens": usage["cached_tokens"],
+        }
+        for k, v in increments.items():
+            stats[k] += v
+            per[k] += v
+        per["checkpoints"] = sc.checkpoints
 
         out_headers = {
             k: v
@@ -234,6 +249,12 @@ def build_app(
             }
         )
 
+    async def session_stats_view(_: Request) -> Response:
+        """Per-session (= per-task) attribution for A/B runs: scrape after each
+        task, keyed by the x-ctxc-session-id you drove the task with."""
+        return JSONResponse({"mode": "shadow" if shadow else "active",
+                             "sessions": session_stats})
+
     @asynccontextmanager
     async def lifespan(_: Starlette):
         try:
@@ -248,6 +269,7 @@ def build_app(
             Route("/chat/completions", chat, methods=["POST"]),
             Route("/healthz", health, methods=["GET"]),
             Route("/stats", stats_view, methods=["GET"]),
+            Route("/stats/sessions", session_stats_view, methods=["GET"]),
         ],
         lifespan=lifespan,
     )
