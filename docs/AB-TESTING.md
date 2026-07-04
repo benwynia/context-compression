@@ -3,15 +3,30 @@
 The claim under test: *routing an agent through ctxc reduces cost without
 reducing task success.* Both halves need numbers. This is the protocol.
 
+## Which comparison
+
+**A = uncompressed control, B = ctxc (deterministic compression).** The control
+is the world you'd live in without the tool — agents hitting the model with
+full context. That's the decision-relevant baseline.
+
+Comparing against third-party compression proxies (condense, headroom) is
+explicitly **out of scope**: it answers "should we buy their product" (already
+decided: no), it requires paying for and routing traffic through their
+services to even run, and the published minmax-bench reference runs already
+give cost-only context for them (with significant caveats — synthetic-baseline
+tokenization and survivorship bias in the deep buckets).
+
 ## Design
 
-Two arms, **one variable**:
+Two arms, **one variable**. Both arms run through the SAME proxy binary so
+instrumentation, recording, and the extra network hop are identical — only
+compression differs:
 
-| | ctxc arm | control arm |
+| | ctxc arm (B) | control arm (A) |
 |---|---|---|
 | agent harness | identical, pinned version | identical, pinned version |
 | model + params | identical (temperature 0 where supported) | identical |
-| base URL | `http://localhost:8790` (ctxc proxy, **active** mode) | provider endpoint directly |
+| base URL | `ctxc proxy` in **active** mode | `ctxc proxy` in **`--passthrough`** mode (no compression, measurement only) |
 
 Outcomes, all objective:
 
@@ -45,12 +60,34 @@ Any harness that speaks OpenAI-compatible chat/completions and lets you set a
 base URL works: mini-swe-agent (simplest), SWE-agent, OpenHands (all
 litellm-based — set the api_base to the proxy).
 
+### Optional third arm: LLM-written digests (in-house compaction)
+
+If the deterministic digest costs resolved tasks, the next question is whether
+an LLM-written digest recovers them — in-house, via a local model, not a
+third-party service:
+
+```bash
+# arm B2: same as B plus a local 7B writing the checkpoint digests
+ctxc proxy --upstream $PROVIDER_URL --budget 60k \
+  --summarizer-url http://localhost:11434/v1 --summarizer-model qwen2.5:7b \
+  --record ./runs/ctxc-llm/sessions --port 8792
+```
+
+Compare pairwise with `ctxc ab` (B vs A, B2 vs A, B2 vs B). The summarizer
+runs once per checkpoint with capped input/output and deterministic fallback,
+so B2's cost profile is B plus a few local-model calls per session — zero
+upstream spend difference. Run B2 only if B shows a quality gap: it's a
+remedy, not a default.
+
 ## Procedure
 
-1. **Start the proxy for the ctxc arm** (one proxy per arm run):
+1. **Start one proxy per arm:**
 
    ```bash
+   # arm B (compressed):
    ctxc proxy --upstream $PROVIDER_URL --budget 60k --record ./runs/ctxc/sessions --port 8790
+   # arm A (control — identical instrumentation, no compression):
+   ctxc proxy --upstream $PROVIDER_URL --budget 60k --passthrough --record ./runs/control/sessions --port 8791
    ```
 
 2. **Run each task with a per-task session id** so cost attributes cleanly.
@@ -73,10 +110,9 @@ litellm-based — set the api_base to the proxy).
     "cache_read": 1520000, "cache_write": 310042, "checkpoints": 3}
    ```
 
-   Write one such `*.json` per task into `runs/ctxc/results/`. For the control
-   arm, take usage from the provider's responses (or run the proxy with a huge
-   `--budget` so it never compresses — then `/stats/sessions` works identically
-   and `checkpoints` stays 0).
+   Write one such `*.json` per task into `runs/ctxc/results/` and
+   `runs/control/results/` — both arms' `/stats/sessions` have the identical
+   shape (the control arm's `checkpoints` is always 0, `emitted == original`).
 
 4. **Grade with the benchmark's official harness** (e.g. `swebench` evaluate)
    — the `resolved` field must come from there, nowhere else.

@@ -159,3 +159,37 @@ async def test_proxy_per_session_stats():
     assert long_s["original_tokens"] > 20_000
     assert short_s["checkpoints"] == 0
     assert short_s["upstream_prompt_tokens"] == 1  # fake upstream's usage block
+
+
+@pytest.mark.anyio
+async def test_passthrough_control_arm():
+    received: list[dict] = []
+    app = build_app(
+        "http://u", budget=20_000, passthrough=True,
+        client=asgi_client(fake_upstream(received)),
+    )
+    long_msgs = synth_session(rounds=30, seed=5)
+    async with asgi_client(app) as client:
+        resp = await client.post(
+            "/v1/chat/completions",
+            json={"model": "gpt-5", "messages": long_msgs},
+            headers={"x-ctxc-session-id": "ctl-1"},
+        )
+        per = (await client.get("/stats/sessions")).json()
+        top = (await client.get("/stats")).json()
+
+    assert resp.status_code == 200
+    assert resp.headers["x-ctxc-mode"] == "passthrough"
+    # the defining property: NOTHING is compressed, even far over budget
+    assert received[0]["body"]["messages"] == long_msgs
+    assert per["mode"] == "passthrough"
+    row = per["sessions"]["ctl-1"]
+    assert row["checkpoints"] == 0
+    assert row["emitted_tokens"] == row["original_tokens"]
+    assert top["saved_tokens"] == 0
+    assert top["upstream_usage_is"] == "baseline"
+
+
+def test_shadow_and_passthrough_are_exclusive():
+    with pytest.raises(ValueError, match="exclusive"):
+        build_app("http://u", budget=1_000, shadow=True, passthrough=True)

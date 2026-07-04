@@ -33,6 +33,30 @@ def _load_messages(path: str) -> list[dict]:
     return data
 
 
+def _add_summarizer_flags(sp) -> None:
+    sp.add_argument("--summarizer-url", default=None, metavar="URL",
+                    help="OpenAI-compatible endpoint for LLM-written digests "
+                         "(e.g. a local Ollama/vLLM: http://localhost:11434/v1)")
+    sp.add_argument("--summarizer-model", default=None, metavar="NAME",
+                    help="model name at --summarizer-url (e.g. qwen2.5:7b)")
+    sp.add_argument("--summarizer-key-env", default=None, metavar="ENV",
+                    help="env var holding the endpoint's API key, if it needs one")
+
+
+def _compress_config(args) -> "CompressConfig | None":
+    url = getattr(args, "summarizer_url", None)
+    model = getattr(args, "summarizer_model", None)
+    if bool(url) != bool(model):
+        raise SystemExit("--summarizer-url and --summarizer-model must be given together")
+    if not url:
+        return None
+    from .summarize import LlmSummarizer
+
+    return CompressConfig(
+        summarizer=LlmSummarizer(url, model, api_key_env=args.summarizer_key_env)
+    )
+
+
 def _rate(args) -> AicRate:
     rates = getattr(args, "rates", None)
     model = getattr(args, "model", None)
@@ -64,6 +88,7 @@ def main(argv: list[str] | None = None) -> int:
     pv.add_argument("--model-cap", default=None)
     pv.add_argument("--rates", help="JSON AIC rates file")
     pv.add_argument("--model", help="model name to look up in --rates")
+    _add_summarizer_flags(pv)
 
     pd = sub.add_parser("demo", help="synthesize a long session and verify it")
     pd.add_argument("--budget", default="40k")
@@ -77,6 +102,16 @@ def main(argv: list[str] | None = None) -> int:
     pa.add_argument("--model", help="model name to look up in --rates")
     pa.add_argument("--json", dest="json_out", help="also write the full report as JSON")
 
+    ps = sub.add_parser("scrape", help="write one per-task result row from a running proxy")
+    ps.add_argument("--proxy", required=True, help="proxy base url, e.g. http://localhost:8790")
+    ps.add_argument("--task-id", required=True, help="the x-ctxc-session-id the task ran under")
+    ps.add_argument("--out", required=True, metavar="DIR", help="results dir for this arm")
+
+    pr = sub.add_parser("resolve", help="merge grader verdicts into result rows")
+    pr.add_argument("results_dir")
+    pr.add_argument("--ids-file", required=True,
+                    help="file with one RESOLVED task_id per line (from the grader)")
+
     pp = sub.add_parser("proxy", help="run the live compression proxy")
     pp.add_argument("--upstream", required=True)
     pp.add_argument("--budget", default="60k")
@@ -85,9 +120,14 @@ def main(argv: list[str] | None = None) -> int:
     pp.add_argument("--shadow", action="store_true",
                     help="forward requests UNTOUCHED; measure would-be savings on "
                          "the side (zero-risk pilot; read them at GET /stats)")
+    pp.add_argument("--passthrough", action="store_true",
+                    help="no compression at all — measurement/recording only. "
+                         "Use for the A/B CONTROL arm so both arms share "
+                         "identical instrumentation")
     pp.add_argument("--record", default=None, metavar="DIR",
                     help="capture each conversation as a replayable session file "
                          "for `ctxc verify`")
+    _add_summarizer_flags(pp)
 
     args = p.parse_args(argv)
     budget = _parse_budget(args.budget) if hasattr(args, "budget") else 0
@@ -123,7 +163,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "verify":
         messages = _load_messages(args.session)
         cap = _parse_budget(args.model_cap) if args.model_cap else None
-        report = verify_session(messages, budget, rate=_rate(args), model_cap=cap)
+        report = verify_session(
+            messages, budget, config=_compress_config(args), rate=_rate(args),
+            model_cap=cap,
+        )
         print(render_report(report))
         return 0 if report.ok else 1
 
@@ -136,6 +179,29 @@ def main(argv: list[str] | None = None) -> int:
         report = verify_session(messages, budget, counter=counter, model_cap=cap)
         print(render_report(report))
         return 0 if report.ok else 1
+
+    if args.cmd == "scrape":
+        from .ab import scrape_row
+
+        row = scrape_row(args.proxy, args.task_id)
+        out = Path(args.out)
+        out.mkdir(parents=True, exist_ok=True)
+        path = out / f"{args.task_id}.json"
+        path.write_text(json.dumps(row, indent=1))
+        print(f"wrote {path}", file=sys.stderr)
+        return 0
+
+    if args.cmd == "resolve":
+        from .ab import mark_resolved
+
+        ids = {
+            line.strip()
+            for line in Path(args.ids_file).read_text().splitlines()
+            if line.strip()
+        }
+        n = mark_resolved(args.results_dir, ids)
+        print(f"updated {n} rows ({len(ids)} resolved ids)", file=sys.stderr)
+        return 0
 
     if args.cmd == "ab":
         from dataclasses import asdict
@@ -156,8 +222,13 @@ def main(argv: list[str] | None = None) -> int:
 
         from .proxy import build_app
 
-        app = build_app(args.upstream, budget, shadow=args.shadow, record_dir=args.record)
-        mode = "SHADOW (traffic untouched, measuring only)" if args.shadow else "ACTIVE"
+        app = build_app(args.upstream, budget, config=_compress_config(args),
+                        shadow=args.shadow, passthrough=args.passthrough,
+                        record_dir=args.record)
+        mode = ("PASSTHROUGH (control arm: no compression, measuring only)"
+                if args.passthrough
+                else "SHADOW (traffic untouched, measuring only)" if args.shadow
+                else "ACTIVE")
         print(f"ctxc proxy: {mode}; savings at http://{args.host}:{args.port}/stats",
               file=sys.stderr)
         uvicorn.run(app, host=args.host, port=args.port)

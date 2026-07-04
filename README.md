@@ -79,7 +79,8 @@ everything else — auth headers and query string included — and returns the
 upstream response plus `x-ctxc-original-tokens` / `x-ctxc-emitted-tokens`
 headers. Compression runs off the event loop (per-session locked), so one big
 checkpoint doesn't stall other sessions. `GET /healthz` shows live session
-count. Responses (including `stream: true`) are buffered, not streamed.
+count. Streaming responses pass through chunk-by-chunk, so chat UIs render
+tokens as they arrive.
 
 ## AIC cost model
 
@@ -107,7 +108,9 @@ Do **not** quote the demo's percentage — it is measured on synthetic data. The
 kit for measuring on *your* traffic, in increasing order of rigor:
 
 1. **Shadow mode (zero risk).** `ctxc proxy --upstream URL --budget 60k
-   --shadow --record ./sessions`. Traffic is forwarded **untouched**; the
+   --shadow --record ./sessions`. (There is also `--passthrough` — no
+   compression at all, measurement only — used as the A/B control arm so both
+   arms share identical instrumentation.) Traffic is forwarded **untouched**; the
    would-be savings are measured on the side and aggregated at `GET /stats`
    (including the upstream's own reported `usage` — provider-billed numbers,
    not tiktoken estimates, and the real cache-hit rate). Compression failures
@@ -143,7 +146,10 @@ cap** — where the uncompressed baseline doesn't cost more, it simply dies.
    `GET /stats/sessions` cost rows, then `ctxc ab ctxc_results/
    control_results/` for resolved rates, an exact McNemar test, cost deltas
    with bootstrap CIs, and the compression-engaged segment. Full protocol in
-   [docs/AB-TESTING.md](docs/AB-TESTING.md).
+   [docs/AB-TESTING.md](docs/AB-TESTING.md); step-by-step from a vanilla
+   machine in [docs/QUICKSTART-SWEBENCH.md](docs/QUICKSTART-SWEBENCH.md); the
+   one-engineer live trial under VS Code + Copilot in
+   [docs/LIVE-COPILOT.md](docs/LIVE-COPILOT.md).
 
 ## Known limitations
 
@@ -154,8 +160,8 @@ cap** — where the uncompressed baseline doesn't cost more, it simply dies.
 - Token counts are tiktoken-based: exact for GPT-family, approximate for other
   models behind an OpenAI-compatible endpoint (the `/stats` upstream `usage`
   numbers are exact).
-- Responses are buffered, not streamed (`stream: true` clients will wait for
-  the full generation).
+- Upstream-reported usage isn't parsed on streamed responses (it rides in the
+  final SSE chunk); token accounting for streamed turns uses local counts.
 - Session state is in-memory: run one proxy worker; a restart just means one
   extra checkpoint per live conversation (correctness unaffected).
 - The proxy adds no auth of its own — deploy it inside your network boundary.
@@ -172,8 +178,30 @@ emitted = sc.request(full_history)               # call per turn
 report = verify_session(messages, budget=60_000) # replay verification
 ```
 
-An optional `CompressConfig(summarizer=...)` hook swaps the deterministic
-digest for an LLM-written summary; nothing in the pipeline requires one.
+### In-house LLM compaction (optional, local)
+
+The deterministic digest can be swapped for an LLM-written one — the in-house
+equivalent of commercial "compaction" services, without routing your transcript
+to a third party. Any OpenAI-compatible endpoint works, including a local 7B:
+
+```bash
+ollama pull qwen2.5:7b        # or vLLM / LM Studio / llama.cpp server
+ctxc proxy --upstream $URL --budget 60k \
+  --summarizer-url http://localhost:11434/v1 --summarizer-model qwen2.5:7b
+```
+
+The hook is deliberately constrained so it can only help, never hurt: it runs
+**once per checkpoint** (a couple of times per long session, never per
+request), its input is bounded (small-context 7Bs are safe), its output is
+held to the same digest token cap, and *any* failure — endpoint down, empty
+reply, over-cap output — falls back to the deterministic digest. The budget
+guarantee is unconditional either way. In code:
+`CompressConfig(summarizer=LlmSummarizer("http://localhost:11434/v1", "qwen2.5:7b"))`.
+
+Honest expectations: the summarizer sees the digest *lines* (per-turn
+extracts), not the full evicted text, so it improves coherence and merges
+redundancy rather than recovering detail the extracts dropped. Whether that
+buys task-completion points is an A/B question — run it as a third arm.
 
 ## Layout
 
