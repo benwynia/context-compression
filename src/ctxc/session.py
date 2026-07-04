@@ -19,7 +19,7 @@ non-append-only history (edited past) falls back to a from-scratch compress.
 from __future__ import annotations
 
 from .compressor import BudgetImpossible, CompressConfig, compress
-from .models import Message
+from .models import Message, copy_chain
 from .tokens import TokenCounter
 
 
@@ -36,6 +36,10 @@ class SessionCompressor:
         self.checkpoints = 0
         self._source: list[Message] = []   # last full history seen from the client
         self._emitted: list[Message] = []  # what we sent upstream for it
+        # Set when the hysteresis target proved unreachable: skip the doomed
+        # target ladder on later checkpoints until a compress lands under the
+        # target again (self-healing — old content eventually becomes evictable).
+        self._target_impossible = False
 
     def _is_append_only(self, history: list[Message]) -> bool:
         n = len(self._source)
@@ -50,23 +54,31 @@ class SessionCompressor:
         """
         budget = self.budget if budget is None else budget
         if self._source and self._is_append_only(history):
-            tail = [dict(m) for m in history[len(self._source):]]
+            tail = copy_chain(history[len(self._source):])
             candidate = self._emitted + tail
         else:
             if self._source:  # edited past: previous emission is unusable
                 self._emitted = []
-            candidate = [dict(m) for m in history]
+            candidate = copy_chain(history)
 
         if self.counter.count_chain(candidate) > budget:
             target = max(1, int(budget * self.config.recompress_to))
-            try:
-                result = compress(candidate, target, self.config, self.counter)
-            except BudgetImpossible:
-                # hysteresis target unreachable — the hard cap is what matters
+            result = None
+            if not self._target_impossible:
+                try:
+                    result = compress(candidate, target, self.config, self.counter)
+                except BudgetImpossible:
+                    self._target_impossible = True
+            if result is None:
+                # hysteresis target unreachable — the hard cap is what matters.
+                # Skip the doomed target ladder on subsequent checkpoints too,
+                # instead of paying two full escalation ladders every turn.
                 result = compress(candidate, budget, self.config, self.counter)
+                if result.compressed_tokens <= target:
+                    self._target_impossible = False  # target achievable again
             candidate = result.messages
             self.checkpoints += 1
 
-        self._source = [dict(m) for m in history]
+        self._source = copy_chain(history)
         self._emitted = candidate
         return candidate

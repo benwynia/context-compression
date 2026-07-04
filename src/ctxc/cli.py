@@ -7,7 +7,7 @@ import json
 import sys
 from pathlib import Path
 
-from .aic import DEFAULT_RATE, load_rates
+from .aic import DEFAULT_RATE, AicRate, load_rates
 from .compressor import BudgetImpossible, CompressConfig, compress
 from .synth import synth_session
 from .tokens import TokenCounter
@@ -33,12 +33,18 @@ def _load_messages(path: str) -> list[dict]:
     return data
 
 
-def _rate(args) -> object:
-    if getattr(args, "rates", None) and getattr(args, "model", None):
-        table = load_rates(args.rates)
-        if args.model in table:
-            return table[args.model]
-        raise SystemExit(f"model {args.model!r} not in {args.rates}")
+def _rate(args) -> AicRate:
+    rates = getattr(args, "rates", None)
+    model = getattr(args, "model", None)
+    if bool(rates) != bool(model):
+        # never silently fall back to the illustrative default when the user
+        # asked for real pricing — half-specified means a wrong dollar figure
+        raise SystemExit("--rates and --model must be given together")
+    if rates and model:
+        table = load_rates(rates)
+        if model in table:
+            return table[model]
+        raise SystemExit(f"model {model!r} not in {rates}")
     return DEFAULT_RATE
 
 

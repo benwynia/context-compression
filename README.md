@@ -17,8 +17,9 @@ Long coding-agent conversations blow past model context caps and get expensive.
 
 1. **tool-result truncation** (old tool outputs become head/tail excerpts;
    error results keep more),
-2. **duplicate elision** (identical tool results collapse to a marker; the first
-   copy survives because it's the one already in the provider's prompt cache),
+2. **duplicate elision** (identical tool results collapse to a marker; the
+   *last* copy survives, so eviction — which removes oldest rounds first — can
+   never strand a marker pointing at content that was itself removed),
 3. **round eviction → digest** (oldest assistant+tool rounds are replaced by a
    single deterministic summary line each) —
 
@@ -70,10 +71,15 @@ ctxc proxy --upstream https://your-openai-compatible-endpoint --budget 60k --por
 
 Point any OpenAI-compatible client at `http://localhost:8790/v1/chat/completions`.
 The proxy keys one `SessionCompressor` per conversation (send an
-`x-ctxc-session-id` header, or it falls back to hashing the chain head),
-compresses `messages`, forwards everything else verbatim (auth included), and
-returns the upstream response plus `x-ctxc-original-tokens` /
-`x-ctxc-emitted-tokens` headers. `GET /healthz` shows live session count.
+`x-ctxc-session-id` header; the fallback hashes the chain's *first message*,
+which is stable across turns but cannot distinguish concurrent conversations
+with identical openings — send the header in multi-user deployments),
+compresses `messages`, counts `tools` schemas against the same budget, forwards
+everything else — auth headers and query string included — and returns the
+upstream response plus `x-ctxc-original-tokens` / `x-ctxc-emitted-tokens`
+headers. Compression runs off the event loop (per-session locked), so one big
+checkpoint doesn't stall other sessions. `GET /healthz` shows live session
+count. Responses (including `stream: true`) are buffered, not streamed.
 
 ## AIC cost model
 
@@ -87,7 +93,13 @@ model in both shapes, because they change what compression is worth:
 
 `--rates rates.json --model <name>` with
 `{"<name>": {"per_request": 1.0, "per_1m_input": 100.0, "per_1m_output": 500.0}}`
-overrides the illustrative default.
+overrides the illustrative default (both flags together — half-specified is an
+error, never a silent fallback to placeholder pricing).
+
+AIC metering has no cache tiers, so the cache read/write split in the report is
+a cache-health signal, not a priced quantity: it tells you what checkpoint
+recompression costs in provider-cache terms even though it doesn't change the
+AIC bill.
 
 ## Library use
 

@@ -60,9 +60,12 @@ Stages, applied in order, recounting after each; stop as soon as `<= budget`:
    results dominate coding-agent transcripts; this is the cheap 80%.
    Error-looking results (config regex) are kept longer — errors get referenced later.
 2. **Duplicate-result elision** — identical tool contents (same hash) appearing
-   more than once: later occurrences collapse to `[ctxc: duplicate of an earlier
-   result]`. The *first* occurrence is kept because it is the one already sitting in
-   the provider's cached prefix.
+   more than once: earlier occurrences collapse to a marker and the *last* copy
+   survives. Keep-last, because stage 3 evicts oldest rounds first: with
+   keep-first the surviving copy is exactly what eviction removes next, leaving
+   markers that point at content no longer in the chain. Prefix stability is
+   unaffected — dedupe only runs inside a checkpoint, which rewrites the
+   emitted prefix anyway.
 3. **Round eviction → digest** — oldest unprotected rounds are evicted and replaced
    by a single **digest** user message inserted right after the protected head:
    one line per evicted round (`assistant: first line… | tools: name(args…) -> first
@@ -116,8 +119,11 @@ requests count (unchanged by compression — stated, not hidden).
 `verify.py` replays a recorded/synthetic session turn-by-turn (each assistant turn =
 one request, prefix = everything before it, exactly a harness's call pattern):
 
-1. **Invariants every turn** — structure valid, budget met, head/tail verbatim,
-   digest well-formed. Any violation fails the run (exit 1, listed in the report).
+1. **Invariants every turn** — structure valid, budget met, head verbatim,
+   digest well-formed (at most one, directly after the head). Any violation
+   fails the run (exit 1, listed in the report). The tail is *not* asserted
+   verbatim: the deepest escalation levels legitimately truncate recent tool
+   results to honor the budget guarantee.
 2. **Prefix stability** — emissions between checkpoints must extend the previous
    emission; checkpoint count and positions are reported.
 3. **Cache-aware accounting** — incremental cache model per turn: unchanged prefix
@@ -134,7 +140,8 @@ Tests (`pytest`):
 - structural invariants on synthetic + adversarial chains (orphan tools, huge
   single results, all-protected chains, empty content, list-form content);
 - hard budget guarantee across a sweep of budgets, or `BudgetImpossible`;
-- protected zone verbatim; dedupe keeps first; truncation markers present;
+- protected zone verbatim; dedupe keeps last (no dangling markers after
+  eviction); truncation markers present;
 - SessionCompressor prefix stability + checkpoint hysteresis;
 - AIC arithmetic;
 - verify harness catches a deliberately broken compressor (mutation test);

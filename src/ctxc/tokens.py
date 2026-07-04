@@ -7,10 +7,9 @@ verification harness needs. The counter is pluggable everywhere it is used.
 
 from __future__ import annotations
 
-import hashlib
 import json
 
-from .models import Message, content_text
+from .models import Message, content_text, fingerprint
 
 
 class TokenCounter:
@@ -32,7 +31,7 @@ class TokenCounter:
     def count_text(self, text: str) -> int:
         if not text:
             return 0
-        key = hashlib.blake2b(text.encode("utf-8", "ignore"), digest_size=16).hexdigest()
+        key = fingerprint(text)
         hit = self._cache.get(key)
         if hit is not None:
             return hit

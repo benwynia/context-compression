@@ -14,7 +14,7 @@ requests only (``stream: true`` is forwarded but the response is buffered).
 
 from __future__ import annotations
 
-import hashlib
+import asyncio
 import json
 from collections import OrderedDict
 from contextlib import asynccontextmanager
@@ -26,6 +26,7 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from .compressor import BudgetImpossible, CompressConfig
+from .models import fingerprint
 from .session import SessionCompressor
 from .tokens import TokenCounter
 
@@ -37,11 +38,21 @@ _HOP_BY_HOP = {
 
 
 def _session_key(request: Request, messages: list) -> str:
+    """Prefer the explicit header. The fallback hashes only the FIRST message —
+    it never changes as the conversation grows, so one conversation keeps one
+    session. It cannot distinguish concurrent conversations that share an
+    identical first message; those callers must send x-ctxc-session-id (README).
+    """
     explicit = request.headers.get("x-ctxc-session-id")
     if explicit:
         return explicit
-    head = json.dumps(messages[:2], ensure_ascii=False, sort_keys=True)
-    return hashlib.blake2b(head.encode("utf-8", "ignore"), digest_size=16).hexdigest()
+    head = json.dumps(messages[:1], ensure_ascii=False, sort_keys=True)
+    return fingerprint(head)
+
+
+def tools_token_count(counter: TokenCounter, tools: list) -> int:
+    """Token cost of the request's tools schemas — one recipe, shared with tests."""
+    return counter.count_text(json.dumps(tools, ensure_ascii=False, sort_keys=True))
 
 
 def build_app(
@@ -69,11 +80,7 @@ def build_app(
 
         # tools schemas share the context window with the messages: they count
         # against the same budget, or a "60k budget" would overshoot the cap.
-        tools_tokens = 0
-        if body.get("tools"):
-            tools_tokens = counter.count_text(
-                json.dumps(body["tools"], ensure_ascii=False, sort_keys=True)
-            )
+        tools_tokens = tools_token_count(counter, body["tools"]) if body.get("tools") else 0
         effective_budget = budget - tools_tokens
         if effective_budget <= 0:
             return JSONResponse(
@@ -84,15 +91,27 @@ def build_app(
             )
 
         key = _session_key(request, messages)
-        sc = sessions.get(key)
-        if sc is None:
-            sc = sessions[key] = SessionCompressor(budget, config=config, counter=counter)
+        entry = sessions.get(key)
+        if entry is None:
+            entry = sessions[key] = (
+                SessionCompressor(budget, config=config, counter=counter),
+                asyncio.Lock(),
+            )
             while len(sessions) > max_sessions:  # LRU: drop the stalest session
                 sessions.popitem(last=False)
         sessions.move_to_end(key)
-        original_tokens = counter.count_chain(messages)
+        sc, lock = entry
         try:
-            emitted = sc.request(messages, budget=effective_budget)
+            # compression is CPU-bound (tokenizing + escalation ladder): run it
+            # off the event loop so one big checkpoint doesn't stall every other
+            # in-flight session; the per-session lock keeps sc state sequential.
+            async with lock:
+                original_tokens, emitted = await asyncio.to_thread(
+                    lambda: (
+                        counter.count_chain(messages),
+                        sc.request(messages, budget=effective_budget),
+                    )
+                )
         except BudgetImpossible as e:
             return JSONResponse(
                 {"error": {"type": "ctxc_budget_impossible", "message": str(e)}},
@@ -108,7 +127,10 @@ def build_app(
             path = "/v1" + path
         elif path.startswith("/v1") and upstream.endswith("/v1"):
             path = path[len("/v1"):]
-        resp = await http.post(f"{upstream}{path}", json=body, headers=fwd_headers)
+        url = f"{upstream}{path}"
+        if request.url.query:  # forward query params (api-version=… etc.) verbatim
+            url = f"{url}?{request.url.query}"
+        resp = await http.post(url, json=body, headers=fwd_headers)
 
         out_headers = {
             k: v

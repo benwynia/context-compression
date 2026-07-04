@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 
 from .aic import DEFAULT_RATE, AicRate, aic_for, usd_for
 from .compressor import BudgetImpossible, CompressConfig
-from .models import Message, head_len, validate_chain
+from .models import Message, head_len, is_digest, protected_head_end, validate_chain
 from .session import SessionCompressor
 from .tokens import TokenCounter
 
@@ -80,10 +80,17 @@ def verify_session(
 ) -> VerifyReport:
     counter = counter or TokenCounter()
     sc = session_compressor or SessionCompressor(budget, config=config, counter=counter)
+    if not hasattr(sc, "checkpoints"):
+        # fail at the source: a silent getattr default would misreport every
+        # legitimate recompression as "prefix instability without a checkpoint"
+        raise TypeError(
+            "session_compressor must expose an integer 'checkpoints' attribute "
+            "that increments whenever it rewrites (rather than extends) its emission"
+        )
     report = VerifyReport(budget=budget, model_cap=model_cap)
 
     prev_emitted: list[Message] | None = None
-    prev_checkpoints = getattr(sc, "checkpoints", 0)
+    prev_checkpoints = sc.checkpoints
 
     for i, msg in enumerate(messages):
         if msg.get("role") != "assistant" or i == 0:
@@ -98,7 +105,7 @@ def verify_session(
             report.violations.append(f"turn {turn}: budget impossible: {e}")
             continue
 
-        checkpoints = getattr(sc, "checkpoints", 0)
+        checkpoints = sc.checkpoints
         is_checkpoint = checkpoints > prev_checkpoints
         prev_checkpoints = checkpoints
 
@@ -113,6 +120,16 @@ def verify_session(
         h = head_len(prefix)
         if emitted[:h] != prefix[:h]:
             report.violations.append(f"turn {turn}: protected head was rewritten")
+        digest_idx = [j for j, m in enumerate(emitted) if is_digest(m)]
+        if len(digest_idx) > 1:
+            report.violations.append(
+                f"turn {turn}: digest malformed: {len(digest_idx)} digest messages"
+            )
+        elif digest_idx and digest_idx[0] != protected_head_end(emitted):
+            report.violations.append(
+                f"turn {turn}: digest malformed: at index {digest_idx[0]}, "
+                f"expected directly after the protected head"
+            )
         if prev_emitted is not None and not is_checkpoint:
             if emitted[: len(prev_emitted)] != prev_emitted:
                 report.violations.append(
@@ -139,7 +156,7 @@ def verify_session(
         )
         prev_emitted = emitted
 
-    report.checkpoints = getattr(sc, "checkpoints", 0)
+    report.checkpoints = sc.checkpoints
     report.baseline_aic = aic_for(
         rate, input_tokens=report.original_prompt_tokens, requests=report.turns
     )

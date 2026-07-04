@@ -3,15 +3,12 @@ budget accounting, verify robustness on impossible budgets, proxy ops limits."""
 
 import json
 
-import httpx
 import pytest
-from starlette.applications import Starlette
-from starlette.responses import JSONResponse
-from starlette.routing import Route
 
+from conftest import asgi_client, fake_upstream
 from ctxc.compressor import compress
 from ctxc.models import validate_chain
-from ctxc.proxy import build_app
+from ctxc.proxy import build_app, tools_token_count
 from ctxc.session import SessionCompressor
 from ctxc.tokens import TokenCounter
 from ctxc.verify import render_report, verify_session
@@ -111,27 +108,10 @@ def test_per_request_budget_override(counter):
 # --------------------------------------------------------------------------- #
 # proxy hardening
 # --------------------------------------------------------------------------- #
-def _fake_upstream(received: list[dict], prefix: str = "/v1"):
-    async def chat(request):
-        received.append({"path": request.url.path, "body": json.loads(await request.body())})
-        return JSONResponse({"choices": [{"message": {"role": "assistant", "content": "ok"}}]})
-
-    return Starlette(routes=[Route(f"{prefix}/chat/completions", chat, methods=["POST"])])
-
-
-def _client_for(app):
-    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://u")
-
-
-@pytest.fixture
-def anyio_backend():
-    return "asyncio"
-
-
 @pytest.mark.anyio
 async def test_proxy_counts_tools_against_budget(counter):
     received: list[dict] = []
-    app = build_app("http://u", budget=10_000, client=_client_for(_fake_upstream(received)))
+    app = build_app("http://u", budget=10_000, client=asgi_client(fake_upstream(received)))
     tools = [
         {
             "type": "function",
@@ -143,11 +123,11 @@ async def test_proxy_counts_tools_against_budget(counter):
         }
         for i in range(10)
     ]
-    tools_tokens = counter.count_text(json.dumps(tools, ensure_ascii=False, sort_keys=True))
+    tools_tokens = tools_token_count(counter, tools)  # the proxy's own recipe
     assert 1_000 < tools_tokens < 9_000
 
     msgs = _realistic_session(rounds=10)
-    async with _client_for(app) as client:
+    async with asgi_client(app) as client:
         resp = await client.post(
             "/v1/chat/completions",
             json={"model": "gpt-5", "messages": msgs, "tools": tools},
@@ -162,9 +142,9 @@ async def test_proxy_counts_tools_against_budget(counter):
 @pytest.mark.anyio
 async def test_proxy_rejects_when_tools_alone_exceed_budget():
     received: list[dict] = []
-    app = build_app("http://u", budget=200, client=_client_for(_fake_upstream(received)))
+    app = build_app("http://u", budget=200, client=asgi_client(fake_upstream(received)))
     tools = [{"type": "function", "function": {"name": "t", "description": "x " * 2000}}]
-    async with _client_for(app) as client:
+    async with asgi_client(app) as client:
         resp = await client.post(
             "/v1/chat/completions",
             json={"model": "gpt-5", "messages": [{"role": "user", "content": "hi"}], "tools": tools},
@@ -177,8 +157,8 @@ async def test_proxy_rejects_when_tools_alone_exceed_budget():
 @pytest.mark.anyio
 async def test_proxy_upstream_already_has_v1():
     received: list[dict] = []
-    app = build_app("http://u/v1", budget=1_000_000, client=_client_for(_fake_upstream(received)))
-    async with _client_for(app) as client:
+    app = build_app("http://u/v1", budget=1_000_000, client=asgi_client(fake_upstream(received)))
+    async with asgi_client(app) as client:
         resp = await client.post(
             "/v1/chat/completions",
             json={"model": "gpt-5", "messages": [{"role": "user", "content": "hi"}]},
@@ -191,10 +171,10 @@ async def test_proxy_upstream_already_has_v1():
 async def test_proxy_session_lru_cap():
     received: list[dict] = []
     app = build_app(
-        "http://u", budget=1_000_000, client=_client_for(_fake_upstream(received)),
+        "http://u", budget=1_000_000, client=asgi_client(fake_upstream(received)),
         max_sessions=2,
     )
-    async with _client_for(app) as client:
+    async with asgi_client(app) as client:
         for sid in ("a", "b", "c"):
             await client.post(
                 "/v1/chat/completions",

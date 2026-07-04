@@ -2,11 +2,11 @@ import pytest
 
 from ctxc.compressor import BudgetImpossible, CompressConfig, compress
 from ctxc.models import (
-    DIGEST_MARKER,
     DUPLICATE_MARKER,
     TRUNCATION_MARKER,
     content_text,
     head_len,
+    is_digest,
     validate_chain,
 )
 from ctxc.synth import synth_session
@@ -57,7 +57,7 @@ def test_truncation_marker_present(session_messages, counter):
     assert any(TRUNCATION_MARKER in t for t in texts)
 
 
-def test_duplicate_elision_keeps_first():
+def test_duplicate_elision_keeps_last():
     msgs = synth_session(rounds=30, seed=11, duplicate_every=3)
     from ctxc.tokens import TokenCounter
 
@@ -65,19 +65,22 @@ def test_duplicate_elision_keeps_first():
     # budget between stage-1 and full: force dedupe to run
     res = compress(msgs, budget=25_000, counter=counter)
     texts = [content_text(m) for m in res.messages if m.get("role") == "tool"]
-    dups = [t for t in texts if t == DUPLICATE_MARKER]
-    if dups:  # if dedupe fired, the first occurrence of some content must survive
-        originals = [
-            t for t in texts if t != DUPLICATE_MARKER and TRUNCATION_MARKER not in t
-        ]
-        assert originals or True  # dedupe never removes every copy
+    marker_positions = [i for i, t in enumerate(texts) if t == DUPLICATE_MARKER]
+    if marker_positions:
+        # keep-LAST: every marker must have a surviving non-marker result after
+        # it (so eviction, which removes oldest first, can never strand markers
+        # pointing at content that was itself removed)
+        last_real = max(
+            i for i, t in enumerate(texts) if t != DUPLICATE_MARKER
+        )
+        assert max(marker_positions) < last_real
     assert validate_chain(res.messages) == []
 
 
 def test_digest_inserted_after_head_when_evicting(session_messages, counter):
     res = compress(session_messages, budget=8_000, counter=counter)
     h = head_len(session_messages)
-    digests = [i for i, m in enumerate(res.messages) if content_text(m).startswith(DIGEST_MARKER)]
+    digests = [i for i, m in enumerate(res.messages) if is_digest(m)]
     if res.evicted_rounds:
         assert digests == [h]
 
@@ -85,7 +88,7 @@ def test_digest_inserted_after_head_when_evicting(session_messages, counter):
 def test_digests_never_nest(session_messages, counter):
     res1 = compress(session_messages, budget=12_000, counter=counter)
     res2 = compress(res1.messages, budget=6_000, counter=counter)
-    digests = [m for m in res2.messages if content_text(m).startswith(DIGEST_MARKER)]
+    digests = [m for m in res2.messages if is_digest(m)]
     assert len(digests) <= 1
     assert validate_chain(res2.messages) == []
 

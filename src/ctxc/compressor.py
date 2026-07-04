@@ -4,10 +4,18 @@ The contract (enforced, and tested):
 
 * the returned chain counts <= budget, or ``BudgetImpossible`` is raised —
   never a silent overshoot;
-* the protected head (system + task) is verbatim;
+* the protected head (system + task, extended through any tool results that
+  answer a head-ending assistant) is verbatim;
 * the returned chain is structurally valid (tool pairing, role order);
 * at most one digest message exists, directly after the head — recompressing an
-  already-compressed chain folds the old digest instead of nesting a new one.
+  already-compressed chain folds the old digest instead of nesting a new one;
+* an optional ``summarizer`` hook is called at most once per compress, and its
+  output is capped like the deterministic digest, so the hook can neither blow
+  the budget nor get invoked per eviction probe.
+
+Escalation floors scale with the budget so small effective budgets (e.g. after
+the proxy subtracts tools-schema tokens) don't hit spurious ``BudgetImpossible``
+on hardcoded rungs.
 """
 
 from __future__ import annotations
@@ -19,8 +27,9 @@ from dataclasses import dataclass, field
 from .models import (
     Message,
     content_text,
-    head_len,
+    copy_chain,
     is_digest,
+    protected_head_end,
     round_boundary_at_or_before,
     validate_chain,
 )
@@ -45,7 +54,8 @@ class CompressConfig:
     error_pattern: str = r"(?i)\berror\b|traceback|\bfailed\b|exit code [1-9]"
     digest_budget_share: float = 0.05  # digest size as a share of the budget
     recompress_to: float = 0.6         # checkpoint hysteresis (see session.py)
-    # optional LLM summarizer hook: receives digest lines, returns the digest body
+    # optional LLM summarizer hook: receives digest lines, returns the digest
+    # body. Called at most once per compress(); output capped at the digest cap.
     summarizer: Callable[[list[str]], str] | None = None
 
 
@@ -64,18 +74,26 @@ class _Level:
     err_trunc: int
     tail_len: int | None  # None = protect only the last round
     tail_trunc: int | None = None
-    digest_cap: int | None = None
+    digest_cap: int = 0   # tokens; set per level in _levels()
 
 
-def _levels(cfg: CompressConfig) -> list[_Level]:
+def _levels(cfg: CompressConfig, budget: int) -> list[_Level]:
+    # Char floors scale down with the budget (~4 chars/token) so a few-hundred-
+    # token budget still has rungs below it instead of fixed 200-char cliffs.
+    floor = max(32, min(200, budget // 20))
+    err_floor = max(48, min(400, budget // 10))
+    digest_default = max(32, min(int(budget * cfg.digest_budget_share), budget // 4))
+    digest_tight = max(16, min(100, budget // 10))
+    lvl1 = max(floor, cfg.tool_result_max_chars // 4)
+    lvl1e = max(err_floor, cfg.error_result_max_chars // 4)
     return [
-        _Level(cfg.tool_result_max_chars, cfg.error_result_max_chars, cfg.keep_recent),
-        _Level(max(200, cfg.tool_result_max_chars // 4),
-               max(400, cfg.error_result_max_chars // 4), cfg.keep_recent),
-        _Level(max(200, cfg.tool_result_max_chars // 4),
-               max(400, cfg.error_result_max_chars // 4), None),
-        _Level(200, 400, None, tail_trunc=400),
-        _Level(120, 120, None, tail_trunc=120, digest_cap=100),
+        _Level(cfg.tool_result_max_chars, cfg.error_result_max_chars,
+               cfg.keep_recent, digest_cap=digest_default),
+        _Level(lvl1, lvl1e, cfg.keep_recent, digest_cap=digest_default),
+        _Level(lvl1, lvl1e, None, digest_cap=digest_default),
+        _Level(floor, err_floor, None, tail_trunc=err_floor, digest_cap=digest_tight),
+        _Level(min(floor, 120), min(floor, 120), None,
+               tail_trunc=min(floor, 120), digest_cap=digest_tight),
     ]
 
 
@@ -89,9 +107,11 @@ def compress(
     counter = counter or TokenCounter()
     original_tokens = counter.count_chain(messages)
     if original_tokens <= budget:
-        return CompressResult(list(messages), original_tokens, original_tokens)
+        # copies, so the no-op path has the same aliasing contract as the
+        # compressed paths (callers may mutate the result safely)
+        return CompressResult(copy_chain(messages), original_tokens, original_tokens)
 
-    h = head_len(messages)
+    h = protected_head_end(messages)
     body_start = h
     prior_digest_lines: list[str] = []
     if body_start < len(messages) and is_digest(messages[body_start]):
@@ -101,23 +121,21 @@ def compress(
         body_start += 1
 
     error_re = re.compile(cfg.error_pattern)
-    last_result: CompressResult | None = None
-    for level in _levels(cfg):
+    for level in _levels(cfg, budget):
         result = _attempt(
             messages, budget, cfg, counter, level,
             h=h, body_start=body_start,
             prior_digest_lines=prior_digest_lines, error_re=error_re,
             original_tokens=original_tokens,
         )
-        last_result = result
-        if result.compressed_tokens <= budget:
+        if result is not None:
             violations = validate_chain(result.messages)
             if violations:  # defensive: never return a broken chain
                 raise AssertionError(f"compressor produced invalid chain: {violations}")
             return result
     raise BudgetImpossible(
-        f"cannot reach budget={budget}: irreducible core is "
-        f"{last_result.compressed_tokens if last_result else original_tokens} tokens"
+        f"cannot reach budget={budget}: the protected head + last round exceed "
+        f"it even at the deepest escalation level"
     )
 
 
@@ -133,10 +151,11 @@ def _attempt(
     prior_digest_lines: list[str],
     error_re: re.Pattern[str],
     original_tokens: int,
-) -> CompressResult:
-    msgs: list[Message] = [dict(m) for m in original]
+) -> CompressResult | None:
+    """One escalation level. Returns a result iff it fits the budget."""
+    msgs: list[Message] = copy_chain(original)
     stages: list[str] = []
-    digest_cap = level.digest_cap or max(200, int(budget * cfg.digest_budget_share))
+    evicted = 0
 
     if level.tail_len is None:
         tail_start = round_boundary_at_or_before(msgs, len(msgs) - 1, body_start)
@@ -146,19 +165,38 @@ def _attempt(
         )
     tail_start = max(tail_start, body_start)
 
-    def assemble(work: list[Message], digest_lines: list[str]) -> list[Message]:
-        head = work[:h]
-        body = work[body_start:]
-        if digest_lines:
-            digest = build_digest_message(
-                digest_lines, counter=counter, token_cap=digest_cap,
-                summarizer=cfg.summarizer,
-            )
-            return head + [digest] + body
-        return head + body
+    def digest_for(lines: list[str], final: bool) -> Message | None:
+        if not lines:
+            return None
+        # the summarizer runs only on the final build — never inside probes
+        return build_digest_message(
+            lines, counter=counter, token_cap=level.digest_cap,
+            summarizer=cfg.summarizer if final else None,
+        )
 
-    def total(work: list[Message], digest_lines: list[str]) -> int:
-        return counter.count_chain(assemble(work, digest_lines))
+    def assemble(work: list[Message], lines: list[str], *, final: bool = False) -> list[Message]:
+        digest = digest_for(lines, final)
+        body = work[body_start:]
+        return work[:h] + ([digest] if digest else []) + body
+
+    def total(work: list[Message], lines: list[str]) -> int:
+        return counter.count_chain(assemble(work, lines))
+
+    def finish(work: list[Message], lines: list[str]) -> CompressResult | None:
+        """Single exit: return a result iff the deterministic build fits. Only
+        then is the summarizer invoked — once per compress, on the succeeding
+        level — and its digest is kept only if it also fits, so the hook can
+        improve the digest but never break the budget or run on doomed levels."""
+        out = assemble(work, lines, final=False)
+        n = counter.count_chain(out)
+        if n > budget:
+            return None
+        if cfg.summarizer is not None and lines:
+            candidate = assemble(work, lines, final=True)
+            n2 = counter.count_chain(candidate)
+            if n2 <= budget:
+                out, n = candidate, n2
+        return CompressResult(out, original_tokens, n, stages, evicted_rounds=evicted)
 
     # stage 1: truncate unprotected tool results
     if truncate_tool_results(
@@ -168,15 +206,13 @@ def _attempt(
         stages.append("truncate")
     digest_lines = list(prior_digest_lines)
     if total(msgs, digest_lines) <= budget:
-        out = assemble(msgs, digest_lines)
-        return CompressResult(out, original_tokens, counter.count_chain(out), stages)
+        return finish(msgs, digest_lines)
 
-    # stage 2: elide duplicate tool results (first occurrence survives)
+    # stage 2: elide duplicate tool results (last occurrence survives)
     if elide_duplicate_results(msgs, body_start, tail_start):
         stages.append("dedupe")
     if total(msgs, digest_lines) <= budget:
-        out = assemble(msgs, digest_lines)
-        return CompressResult(out, original_tokens, counter.count_chain(out), stages)
+        return finish(msgs, digest_lines)
 
     # stage 3: evict whole rounds oldest-first into the digest
     msgs, digest_lines, evicted = evict_rounds(
@@ -196,7 +232,4 @@ def _attempt(
         ):
             stages.append("truncate-tail")
 
-    out = assemble(msgs, digest_lines)
-    return CompressResult(
-        out, original_tokens, counter.count_chain(out), stages, evicted_rounds=evicted
-    )
+    return finish(msgs, digest_lines)

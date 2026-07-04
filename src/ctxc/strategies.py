@@ -7,7 +7,6 @@ on rounds (see :mod:`ctxc.models`), never on raw message slices.
 
 from __future__ import annotations
 
-import hashlib
 import re
 from collections.abc import Callable
 
@@ -16,6 +15,7 @@ from .models import (
     DUPLICATE_MARKER,
     Message,
     content_text,
+    fingerprint,
     round_starts,
     set_content_text,
 )
@@ -26,10 +26,13 @@ def truncate_text(text: str, max_chars: int) -> tuple[str, bool]:
     """Head+tail excerpt with an explicit elision marker."""
     if len(text) <= max_chars:
         return text, False
+    if max_chars <= 0:  # "keep nothing": marker only — never re-emit the body
+        return f"[ctxc: truncated {len(text)} chars]", True
     head = int(max_chars * 0.6)
     tail = max_chars - head
     cut = len(text) - head - tail
-    return f"{text[:head]}\n[ctxc: truncated {cut} chars]\n{text[-tail:]}", True
+    kept_tail = text[-tail:] if tail > 0 else ""
+    return f"{text[:head]}\n[ctxc: truncated {cut} chars]\n{kept_tail}", True
 
 
 def truncate_tool_results(
@@ -57,22 +60,33 @@ def truncate_tool_results(
 
 
 def elide_duplicate_results(msgs: list[Message], start: int, end: int) -> bool:
-    """Stage 2: identical tool results collapse to a marker — the *first*
-    occurrence survives because it is the one already in the cached prefix."""
-    seen: set[str] = set()
+    """Stage 2: identical tool results collapse to a marker — the *last*
+    occurrence survives.
+
+    Keep-last, not keep-first, because stage 3 evicts oldest rounds first: with
+    keep-first the surviving copy is exactly what eviction removes next, leaving
+    markers pointing at content that no longer exists. Markers sit early (cheap
+    to evict); the real content sits late, where it survives longest. Prefix
+    stability is unaffected: dedupe only ever runs inside a checkpoint, which
+    rewrites the emitted prefix anyway.
+    """
+    end = min(end, len(msgs))
+    last_seen: dict[str, int] = {}
+    for i in range(start, end):
+        if msgs[i].get("role") == "tool":
+            text = content_text(msgs[i])
+            if text != DUPLICATE_MARKER:
+                last_seen[fingerprint(text)] = i
     changed = False
-    for i in range(start, min(end, len(msgs))):
+    for i in range(start, end):
         if msgs[i].get("role") != "tool":
             continue
         text = content_text(msgs[i])
         if text == DUPLICATE_MARKER:
             continue
-        key = hashlib.blake2b(text.encode("utf-8", "ignore"), digest_size=16).hexdigest()
-        if key in seen:
+        if last_seen.get(fingerprint(text)) != i:
             msgs[i] = set_content_text(msgs[i], DUPLICATE_MARKER)
             changed = True
-        else:
-            seen.add(key)
     return changed
 
 
@@ -110,18 +124,33 @@ def build_digest_message(
     summarizer: Callable[[list[str]], str] | None = None,
 ) -> Message:
     """The single digest message replacing evicted rounds. Oldest lines are
-    dropped first when the cap is exceeded; the drop is stated, never silent."""
+    dropped first when the cap is exceeded; the drop is stated, never silent.
+
+    A summarizer's output is held to the same ``token_cap`` as the
+    deterministic path — an over-cap summary falls back to the deterministic
+    digest so the budget guarantee cannot be broken by the hook.
+    """
+    body: str | None = None
     if summarizer is not None:
-        body = summarizer(lines)
-    else:
+        candidate = summarizer(lines)
+        if counter.count_text(candidate) <= token_cap:
+            body = candidate
+    if body is None:
         kept = list(lines)
         dropped = 0
         while kept and counter.count_text("\n".join(kept)) > token_cap and len(kept) > 1:
             kept.pop(0)
             dropped += 1
+        # a single line can still exceed the cap: cut by chars, then *verify in
+        # tokens* — chars/token varies (code, CJK), so halve until it truly fits
         if kept and counter.count_text(kept[0]) > token_cap:
-            # a single line can still exceed the cap — hard-cut, never overshoot
-            kept[0], _ = truncate_text(kept[0], max(80, token_cap * 3))
+            original = kept[0]
+            max_chars = max(80, token_cap * 3)
+            cut, _ = truncate_text(original, max_chars)
+            while counter.count_text(cut) > token_cap and max_chars > 16:
+                max_chars //= 2
+                cut, _ = truncate_text(original, max_chars)
+            kept[0] = cut
         if dropped:
             kept.insert(0, f"(… {dropped} earlier rounds elided …)")
         body = "\n".join(kept)
@@ -149,8 +178,10 @@ def evict_rounds(
     while True:
         if fits(msgs, digest_lines):
             return msgs, digest_lines, evicted
+        if start >= end:
+            return msgs, digest_lines, evicted
         starts = round_starts(msgs, start, end)
-        if not starts or start >= end:
+        if not starts:  # range holds only tool messages: nothing evictable here
             return msgs, digest_lines, evicted
         r_end = starts[1] if len(starts) > 1 else end
         digest_lines.append(digest_round(msgs, starts[0], r_end))

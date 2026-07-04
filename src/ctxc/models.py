@@ -8,13 +8,27 @@ without ever breaking a tool_call/tool pairing.
 
 from __future__ import annotations
 
+import hashlib
 from typing import Any
 
 Message = dict[str, Any]
 
 DIGEST_MARKER = "[ctxc digest]"
 TRUNCATION_MARKER = "[ctxc: truncated"
-DUPLICATE_MARKER = "[ctxc: duplicate of an earlier result]"
+DUPLICATE_MARKER = "[ctxc: duplicate result elided; the full content appears later in this conversation]"
+
+
+def fingerprint(text: str) -> str:
+    """The one text-fingerprint used package-wide (counter cache keys, duplicate
+    detection, session keys) so 'the same text' means the same thing everywhere."""
+    return hashlib.blake2b(text.encode("utf-8", "ignore"), digest_size=16).hexdigest()
+
+
+def copy_chain(messages: list[Message]) -> list[Message]:
+    """Shallow per-message copy. Nested structures (tool_calls, content parts)
+    stay aliased — safe because compression never mutates inside them, only
+    replaces whole values via new dicts (see set_content_text)."""
+    return [dict(m) for m in messages]
 
 
 def content_text(msg: Message) -> str:
@@ -119,18 +133,28 @@ def head_len(messages: list[Message]) -> int:
     return n
 
 
+def protected_head_end(messages: list[Message]) -> int:
+    """``head_len`` extended through any tool messages answering a head-ending
+    assistant (a transcript can open mid-round), so nothing — digest included —
+    is ever inserted between a tool_call and its results."""
+    h = head_len(messages)
+    while h < len(messages) and messages[h].get("role") == "tool":
+        h += 1
+    return h
+
+
 def round_starts(messages: list[Message], start: int, end: int) -> list[int]:
     """Indices in ``[start, end)`` where a round begins.
 
     A round is an assistant message plus the tool messages answering it, or a
-    standalone user message. Tool messages never start a round.
+    standalone user message. Tool messages never start a round, so the result
+    can be empty (callers must handle that honestly rather than fabricate one).
     """
-    starts = [
+    return [
         i
         for i in range(start, end)
         if messages[i].get("role") in ("user", "assistant")
     ]
-    return starts or [start]
 
 
 def round_boundary_at_or_before(messages: list[Message], idx: int, lo: int) -> int:
