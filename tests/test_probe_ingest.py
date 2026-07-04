@@ -184,3 +184,40 @@ def test_fleet_sweep(tmp_path, capsys):
 
     assert main(["fleet", str(tmp_path), "--budget", "20k"]) == 0
     assert "engagement:" in capsys.readouterr().out
+
+
+def test_claude_code_repairs_inverted_tool_pairing(tmp_path):
+    """Claude Code transcripts are a tree — a tool_result can be written BEFORE
+    its tool_use. Import must repair the ordering, not emit an orphan."""
+    lines = [
+        {"type": "user", "message": {"role": "user", "content": "go"}},
+        # tool_result appears in the file BEFORE the assistant tool_use (real
+        # Claude Code inversion observed on a 140k-token session)
+        {"type": "user", "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "t9", "content": "result body"}]}},
+        {"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "t9", "name": "Read", "input": {}}]}},
+        {"type": "assistant", "message": {"role": "assistant",
+                                          "content": [{"type": "text", "text": "done"}]}},
+    ]
+    f = tmp_path / "inv.jsonl"
+    f.write_text("\n".join(json.dumps(x) for x in lines))
+    msgs = claude_code_jsonl(f)
+    assert validate_chain(msgs) == []  # no orphan
+    # the result now follows its issuing assistant
+    ai = next(i for i, m in enumerate(msgs)
+              if m.get("role") == "assistant" and m.get("tool_calls"))
+    assert msgs[ai + 1] == {"role": "tool", "tool_call_id": "t9", "content": "result body"}
+
+
+def test_claude_code_drops_unmatched_orphan_result(tmp_path):
+    lines = [
+        {"type": "user", "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "ghost", "content": "x"}]}},
+        {"type": "user", "message": {"role": "user", "content": "hello"}},
+    ]
+    f = tmp_path / "orphan.jsonl"
+    f.write_text("\n".join(json.dumps(x) for x in lines))
+    msgs = claude_code_jsonl(f)
+    assert validate_chain(msgs) == []
+    assert all(m.get("role") != "tool" for m in msgs)  # unmatched orphan dropped

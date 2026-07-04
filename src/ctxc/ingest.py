@@ -36,6 +36,41 @@ def _flatten_block_content(content) -> str:
     return "" if content is None else str(content)
 
 
+def _repair_tool_pairing(messages: list[Message]) -> list[Message]:
+    """Reorder so every tool result immediately follows the assistant that
+    issued its tool_call.
+
+    Claude Code transcripts are a message *tree* (each line has a parentUuid),
+    and the file isn't always in conversation order — a tool_result can be
+    written before the tool_use that created it. tool_call ids are unique, so
+    we can repair deterministically: index tool results by id, then walk the
+    messages emitting each assistant followed by the results answering its
+    calls (in call order). Results whose call never appears are genuine
+    orphans (sidechain leakage, truncated captures) and are dropped.
+    """
+    from .models import tool_call_ids
+
+    results_by_id: dict[str, list[Message]] = {}
+    for m in messages:
+        if m.get("role") == "tool" and m.get("tool_call_id"):
+            results_by_id.setdefault(m["tool_call_id"], []).append(m)
+
+    out: list[Message] = []
+    emitted_results: set[int] = set()
+    for m in messages:
+        role = m.get("role")
+        if role == "tool":
+            continue  # emitted next to its issuing assistant, below
+        out.append(m)
+        if role == "assistant":
+            for tcid in tool_call_ids(m):
+                for res in results_by_id.get(tcid, []):
+                    if id(res) not in emitted_results:
+                        out.append(res)
+                        emitted_results.add(id(res))
+    return out
+
+
 def claude_code_jsonl(path: str | Path) -> list[Message]:
     """One Claude Code session JSONL -> OpenAI-dialect messages."""
     out: list[Message] = []
@@ -101,7 +136,7 @@ def claude_code_jsonl(path: str | Path) -> list[Message]:
                     })
                 elif kind == "text" and b.get("text"):
                     out.append({"role": "user", "content": b["text"]})
-    return out
+    return _repair_tool_pairing(out)
 
 
 def claude_export(path: str | Path) -> dict[str, list[Message]]:
