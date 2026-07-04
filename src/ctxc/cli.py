@@ -33,6 +33,30 @@ def _load_messages(path: str) -> list[dict]:
     return data
 
 
+def _add_summarizer_flags(sp) -> None:
+    sp.add_argument("--summarizer-url", default=None, metavar="URL",
+                    help="OpenAI-compatible endpoint for LLM-written digests "
+                         "(e.g. a local Ollama/vLLM: http://localhost:11434/v1)")
+    sp.add_argument("--summarizer-model", default=None, metavar="NAME",
+                    help="model name at --summarizer-url (e.g. qwen2.5:7b)")
+    sp.add_argument("--summarizer-key-env", default=None, metavar="ENV",
+                    help="env var holding the endpoint's API key, if it needs one")
+
+
+def _compress_config(args) -> "CompressConfig | None":
+    url = getattr(args, "summarizer_url", None)
+    model = getattr(args, "summarizer_model", None)
+    if bool(url) != bool(model):
+        raise SystemExit("--summarizer-url and --summarizer-model must be given together")
+    if not url:
+        return None
+    from .summarize import LlmSummarizer
+
+    return CompressConfig(
+        summarizer=LlmSummarizer(url, model, api_key_env=args.summarizer_key_env)
+    )
+
+
 def _rate(args) -> AicRate:
     rates = getattr(args, "rates", None)
     model = getattr(args, "model", None)
@@ -64,6 +88,7 @@ def main(argv: list[str] | None = None) -> int:
     pv.add_argument("--model-cap", default=None)
     pv.add_argument("--rates", help="JSON AIC rates file")
     pv.add_argument("--model", help="model name to look up in --rates")
+    _add_summarizer_flags(pv)
 
     pd = sub.add_parser("demo", help="synthesize a long session and verify it")
     pd.add_argument("--budget", default="40k")
@@ -92,6 +117,7 @@ def main(argv: list[str] | None = None) -> int:
     pp.add_argument("--record", default=None, metavar="DIR",
                     help="capture each conversation as a replayable session file "
                          "for `ctxc verify`")
+    _add_summarizer_flags(pp)
 
     args = p.parse_args(argv)
     budget = _parse_budget(args.budget) if hasattr(args, "budget") else 0
@@ -127,7 +153,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "verify":
         messages = _load_messages(args.session)
         cap = _parse_budget(args.model_cap) if args.model_cap else None
-        report = verify_session(messages, budget, rate=_rate(args), model_cap=cap)
+        report = verify_session(
+            messages, budget, config=_compress_config(args), rate=_rate(args),
+            model_cap=cap,
+        )
         print(render_report(report))
         return 0 if report.ok else 1
 
@@ -160,8 +189,9 @@ def main(argv: list[str] | None = None) -> int:
 
         from .proxy import build_app
 
-        app = build_app(args.upstream, budget, shadow=args.shadow,
-                        passthrough=args.passthrough, record_dir=args.record)
+        app = build_app(args.upstream, budget, config=_compress_config(args),
+                        shadow=args.shadow, passthrough=args.passthrough,
+                        record_dir=args.record)
         mode = ("PASSTHROUGH (control arm: no compression, measuring only)"
                 if args.passthrough
                 else "SHADOW (traffic untouched, measuring only)" if args.shadow

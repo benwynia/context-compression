@@ -60,6 +60,25 @@ Any harness that speaks OpenAI-compatible chat/completions and lets you set a
 base URL works: mini-swe-agent (simplest), SWE-agent, OpenHands (all
 litellm-based — set the api_base to the proxy).
 
+### Optional third arm: LLM-written digests (in-house compaction)
+
+If the deterministic digest costs resolved tasks, the next question is whether
+an LLM-written digest recovers them — in-house, via a local model, not a
+third-party service:
+
+```bash
+# arm B2: same as B plus a local 7B writing the checkpoint digests
+ctxc proxy --upstream $PROVIDER_URL --budget 60k \
+  --summarizer-url http://localhost:11434/v1 --summarizer-model qwen2.5:7b \
+  --record ./runs/ctxc-llm/sessions --port 8792
+```
+
+Compare pairwise with `ctxc ab` (B vs A, B2 vs A, B2 vs B). The summarizer
+runs once per checkpoint with capped input/output and deterministic fallback,
+so B2's cost profile is B plus a few local-model calls per session — zero
+upstream spend difference. Run B2 only if B shows a quality gap: it's a
+remedy, not a default.
+
 ## Procedure
 
 1. **Start one proxy per arm:**

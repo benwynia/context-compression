@@ -132,8 +132,13 @@ def build_digest_message(
     """
     body: str | None = None
     if summarizer is not None:
-        candidate = summarizer(lines)
-        if counter.count_text(candidate) <= token_cap:
+        try:
+            candidate = summarizer(lines)
+        except Exception:
+            # a dead/misbehaving summarizer endpoint must never break the
+            # budget guarantee — the deterministic digest always exists
+            candidate = None
+        if candidate is not None and counter.count_text(candidate) <= token_cap:
             body = candidate
     if body is None:
         kept = list(lines)

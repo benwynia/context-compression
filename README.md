@@ -174,8 +174,30 @@ emitted = sc.request(full_history)               # call per turn
 report = verify_session(messages, budget=60_000) # replay verification
 ```
 
-An optional `CompressConfig(summarizer=...)` hook swaps the deterministic
-digest for an LLM-written summary; nothing in the pipeline requires one.
+### In-house LLM compaction (optional, local)
+
+The deterministic digest can be swapped for an LLM-written one — the in-house
+equivalent of commercial "compaction" services, without routing your transcript
+to a third party. Any OpenAI-compatible endpoint works, including a local 7B:
+
+```bash
+ollama pull qwen2.5:7b        # or vLLM / LM Studio / llama.cpp server
+ctxc proxy --upstream $URL --budget 60k \
+  --summarizer-url http://localhost:11434/v1 --summarizer-model qwen2.5:7b
+```
+
+The hook is deliberately constrained so it can only help, never hurt: it runs
+**once per checkpoint** (a couple of times per long session, never per
+request), its input is bounded (small-context 7Bs are safe), its output is
+held to the same digest token cap, and *any* failure — endpoint down, empty
+reply, over-cap output — falls back to the deterministic digest. The budget
+guarantee is unconditional either way. In code:
+`CompressConfig(summarizer=LlmSummarizer("http://localhost:11434/v1", "qwen2.5:7b"))`.
+
+Honest expectations: the summarizer sees the digest *lines* (per-turn
+extracts), not the full evicted text, so it improves coherence and merges
+redundancy rather than recovering detail the extracts dropped. Whether that
+buys task-completion points is an A/B question — run it as a third arm.
 
 ## Layout
 
