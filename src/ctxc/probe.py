@@ -31,8 +31,22 @@ _LABELS = [
     "ivory", "maroon", "olive", "quartz",
 ]
 
+# Two probe styles keep the measurement honest. "note" facts look like real
+# critical facts (codes, NOTE markers) — the salience heuristics SHOULD catch
+# them, and measuring that is fair. "plain" facts are deliberately pattern-free
+# prose (lowercase, no digits, no keywords) — they measure the residual loss
+# the heuristics cannot see, so salience can't grade its own homework.
+STYLES = ("note", "plain")
 
-def _nonce(rng: random.Random) -> str:
+_PLAIN_WORDS = (
+    ["twelve", "forty", "sixty", "ninety", "twenty", "thirty"],
+    ["spools", "crates", "marbles", "ladders", "baskets", "kettles"],
+)
+
+
+def _nonce(rng: random.Random, style: str) -> str:
+    if style == "plain":
+        return f"{rng.choice(_PLAIN_WORDS[0])} {rng.choice(_PLAIN_WORDS[1])}"
     return f"{rng.choice(['FROST', 'EMBER', 'RIDGE', 'DELTA'])}-{rng.randint(1000, 9999)}"
 
 
@@ -43,9 +57,15 @@ class Probe:
     nonce: str         # the answer a correct retrieval must contain
     msg_index: int     # where it was planted (index in the planted chain)
     depth_pct: float   # token position as % of total chain
+    style: str = "note"
 
     @property
     def question(self) -> str:
+        if self.style == "plain":
+            return (
+                f"Earlier in this conversation, what did the {self.label} "
+                f"allocation end up being? Reply with only those two words."
+            )
         return (
             f"Earlier in this conversation an AUDIT-NOTE stated the {self.label} "
             f"clearance code. Reply with ONLY that code and nothing else."
@@ -79,6 +99,7 @@ def plant_probes(
     n: int = 8,
     seed: int = 0,
     counter: TokenCounter | None = None,
+    style: str = "note",
 ) -> tuple[list[Message], list[Probe]]:
     """Copy of the chain with ``n`` labeled facts appended to plain-string
     messages at evenly spread token depths (structure untouched)."""
@@ -105,11 +126,14 @@ def plant_probes(
         idx = min(candidates, key=lambda i: abs(cum[i] / total - target_pct))
         candidates.remove(idx)
         label = _LABELS[k]
-        nonce = _nonce(rng)
-        fact = f"AUDIT-NOTE: the {label} clearance code is {nonce}."
+        nonce = _nonce(rng, style)
+        if style == "plain":
+            fact = f"as discussed, the {label} allocation ended up being {nonce}."
+        else:
+            fact = f"AUDIT-NOTE: the {label} clearance code is {nonce}."
         msgs[idx] = dict(msgs[idx])
         msgs[idx]["content"] = f"{msgs[idx]['content']}\n{fact}"
-        probes.append(Probe(label, fact, nonce, idx, 100.0 * cum[idx] / total))
+        probes.append(Probe(label, fact, nonce, idx, 100.0 * cum[idx] / total, style))
     return msgs, probes
 
 
@@ -132,6 +156,7 @@ def run_probes(
     *,
     n: int = 8,
     seed: int = 0,
+    style: str = "note",
     config: CompressConfig | None = None,
     counter: TokenCounter | None = None,
     ask: Callable[[list[Message], str], str] | None = None,
@@ -139,7 +164,8 @@ def run_probes(
     """Plant, compress, classify; if ``ask(context_messages, question) -> answer``
     is given, also measure paired retrieval (compressed vs original)."""
     counter = counter or TokenCounter()
-    planted, probes = plant_probes(messages, n=n, seed=seed, counter=counter)
+    planted, probes = plant_probes(messages, n=n, seed=seed, counter=counter,
+                                   style=style)
     res = compress(planted, budget, config, counter)
     report = ProbeReport(
         budget=budget,

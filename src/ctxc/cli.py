@@ -145,6 +145,10 @@ def main(argv: list[str] | None = None) -> int:
     pb.add_argument("--budget", default="60k")
     pb.add_argument("--n", type=int, default=8, help="number of probes")
     pb.add_argument("--seed", type=int, default=0)
+    pb.add_argument("--style", choices=["note", "plain"], default="note",
+                    help="'note' = salient-shaped facts (codes, NOTE markers); "
+                         "'plain' = pattern-free prose, measures residual loss "
+                         "the salience heuristics cannot see")
     pb.add_argument("--live", action="store_true",
                     help="also ask a real model to retrieve each fact (paired "
                          "compressed vs original)")
@@ -253,7 +257,8 @@ def main(argv: list[str] | None = None) -> int:
                 r.raise_for_status()
                 return (r.json()["choices"][0]["message"].get("content") or "")
 
-        report = run_probes(messages, budget, n=args.n, seed=args.seed, ask=ask)
+        report = run_probes(messages, budget, n=args.n, seed=args.seed,
+                            style=args.style, ask=ask)
         print(render_probe_report(report))
         return 0
 

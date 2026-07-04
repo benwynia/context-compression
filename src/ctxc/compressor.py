@@ -34,6 +34,7 @@ from .models import (
     validate_chain,
 )
 from .strategies import (
+    DEFAULT_SALIENCE,
     build_digest_message,
     elide_duplicate_results,
     evict_rounds,
@@ -54,6 +55,16 @@ class CompressConfig:
     error_pattern: str = r"(?i)\berror\b|traceback|\bfailed\b|exit code [1-9]"
     digest_budget_share: float = 0.05  # digest size as a share of the budget
     recompress_to: float = 0.6         # checkpoint hysteresis (see session.py)
+    # salience: lines matching this survive truncation (from the cut middle)
+    # and eviction (as digest "keep:" lines) — retention by importance, not
+    # position. None disables. See strategies.DEFAULT_SALIENCE.
+    salience_pattern: str | None = DEFAULT_SALIENCE
+    digest_salient_lines: int = 3      # max salient lines kept per evicted round
+    # pinning: content matching this is IMMUNE to truncation and eviction — the
+    # explicit escape hatch for critical facts ("ctxc:pin" anywhere in a
+    # message). Over-pinning can make a budget impossible; that failure is
+    # loud, never silent.
+    pin_pattern: str | None = r"ctxc:pin"
     # optional LLM summarizer hook: receives digest lines, returns the digest
     # body. Called at most once per compress(); output capped at the digest cap.
     summarizer: Callable[[list[str]], str] | None = None
@@ -82,8 +93,10 @@ def _levels(cfg: CompressConfig, budget: int) -> list[_Level]:
     # token budget still has rungs below it instead of fixed 200-char cliffs.
     floor = max(32, min(200, budget // 20))
     err_floor = max(48, min(400, budget // 10))
-    digest_default = max(32, min(int(budget * cfg.digest_budget_share), budget // 4))
-    digest_tight = max(16, min(100, budget // 10))
+    # salient "keep:" lines make digest tokens carry real information, so the
+    # caps are budget-proportional rather than a fixed 100-token cliff
+    digest_default = max(48, min(int(budget * cfg.digest_budget_share), budget // 3))
+    digest_tight = max(32, min(300, budget // 8))
     lvl1 = max(floor, cfg.tool_result_max_chars // 4)
     lvl1e = max(err_floor, cfg.error_result_max_chars // 4)
     return [
@@ -121,11 +134,14 @@ def compress(
         body_start += 1
 
     error_re = re.compile(cfg.error_pattern)
+    salience_re = re.compile(cfg.salience_pattern) if cfg.salience_pattern else None
+    pin_re = re.compile(cfg.pin_pattern) if cfg.pin_pattern else None
     for level in _levels(cfg, budget):
         result = _attempt(
             messages, budget, cfg, counter, level,
             h=h, body_start=body_start,
             prior_digest_lines=prior_digest_lines, error_re=error_re,
+            salience_re=salience_re, pin_re=pin_re,
             original_tokens=original_tokens,
         )
         if result is not None:
@@ -150,6 +166,8 @@ def _attempt(
     body_start: int,
     prior_digest_lines: list[str],
     error_re: re.Pattern[str],
+    salience_re: re.Pattern[str] | None,
+    pin_re: re.Pattern[str] | None,
     original_tokens: int,
 ) -> CompressResult | None:
     """One escalation level. Returns a result iff it fits the budget."""
@@ -172,6 +190,7 @@ def _attempt(
         return build_digest_message(
             lines, counter=counter, token_cap=level.digest_cap,
             summarizer=cfg.summarizer if final else None,
+            salience=salience_re,
         )
 
     def assemble(work: list[Message], lines: list[str], *, final: bool = False) -> list[Message]:
@@ -202,6 +221,7 @@ def _attempt(
     if truncate_tool_results(
         msgs, body_start, tail_start,
         max_chars=level.trunc, error_max_chars=level.err_trunc, error_re=error_re,
+        salience=salience_re, pin_re=pin_re,
     ):
         stages.append("truncate")
     digest_lines = list(prior_digest_lines)
@@ -219,6 +239,7 @@ def _attempt(
         msgs, body_start, tail_start,
         fits=lambda work, lines: total(work, lines) <= budget,
         digest_lines=digest_lines,
+        salience=salience_re, max_salient=cfg.digest_salient_lines, pin_re=pin_re,
     )
     if evicted:
         stages.append("evict")
@@ -228,7 +249,7 @@ def _attempt(
         if truncate_tool_results(
             msgs, body_start, len(msgs),
             max_chars=level.tail_trunc, error_max_chars=level.tail_trunc,
-            error_re=error_re,
+            error_re=error_re, salience=salience_re, pin_re=pin_re,
         ):
             stages.append("truncate-tail")
 

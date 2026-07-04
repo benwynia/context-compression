@@ -20,8 +20,12 @@ Long coding-agent conversations blow past model context caps and get expensive.
 2. **duplicate elision** (identical tool results collapse to a marker; the
    *last* copy survives, so eviction — which removes oldest rounds first — can
    never strand a marker pointing at content that was itself removed),
-3. **round eviction → digest** (oldest assistant+tool rounds are replaced by a
-   single deterministic summary line each) —
+3. **round eviction → digest** (oldest assistant+tool rounds are replaced by
+   digest lines that keep each round's most **salient** content — errors,
+   decisions, identifiers, NOTE/TODO markers — scored and retained by
+   importance, not position; under the digest cap, narrative dies before
+   salient facts). Content containing `ctxc:pin` is immune to truncation and
+   eviction entirely — the explicit escape hatch for critical facts —
 
 with an escalation loop that **guarantees** the result fits the token budget or
 raises an explicit `BudgetImpossible` (never a silent overshoot), and always
@@ -42,7 +46,9 @@ ctxc verify session.json --budget 60k          # exit 1 on any violation
 ctxc demo --budget 40k --model-cap 50k
 ctxc import ~/.claude/projects/<p>/<s>.jsonl --out sessions/   # real transcripts in
 ctxc probe sessions/<s>.json --budget 60k      # retention profile (add --live
-                                               # to test model retrieval, ~1c)
+                                               # to test model retrieval, ~1c;
+                                               # --style plain measures loss the
+                                               # salience heuristics can't see)
 ```
 
 The verifier replays the session one request per assistant turn (exactly a
