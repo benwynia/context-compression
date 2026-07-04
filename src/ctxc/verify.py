@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .aic import DEFAULT_RATE, AicRate, aic_for, usd_for
+from .aic import DEFAULT_RATE, AicRate, aic_cached_for, aic_for, usd_for
 from .compressor import BudgetImpossible, CompressConfig
 from .models import Message, head_len, is_digest, protected_head_end, validate_chain
 from .session import SessionCompressor
@@ -52,6 +52,13 @@ class VerifyReport:
     compressed_aic: float = 0.0
     baseline_usd: float = 0.0
     compressed_usd: float = 0.0
+    # cache-aware costing (only when the rate carries cache tiers): the baseline
+    # is a perfectly-cached growing chain; the compressed side pays real
+    # re-writes at every checkpoint
+    baseline_cache_read: int = 0
+    baseline_cache_write: int = 0
+    baseline_aic_cached: float | None = None
+    compressed_aic_cached: float | None = None
     over_cap_before: int = 0
     over_cap_after: int = 0
     model_cap: int | None = None
@@ -91,6 +98,7 @@ def verify_session(
 
     prev_emitted: list[Message] | None = None
     prev_checkpoints = sc.checkpoints
+    prev_original_tokens = 0
 
     for i, msg in enumerate(messages):
         if msg.get("role") != "assistant" or i == 0:
@@ -143,6 +151,12 @@ def verify_session(
             read = counter.count_chain(emitted[: _common_prefix_len(prev_emitted, emitted)])
         write = emitted_tokens - read
         original_tokens = counter.count_chain(prefix)
+        # baseline chain grows append-only: prior prompt is the cache read,
+        # the newly appended tail is the cache write
+        base_read = min(prev_original_tokens, original_tokens)
+        report.baseline_cache_read += base_read
+        report.baseline_cache_write += original_tokens - base_read
+        prev_original_tokens = original_tokens
 
         report.original_prompt_tokens += original_tokens
         report.emitted_prompt_tokens += emitted_tokens
@@ -165,6 +179,15 @@ def verify_session(
     )
     report.baseline_usd = usd_for(report.baseline_aic)
     report.compressed_usd = usd_for(report.compressed_aic)
+    if rate.cache_aware:
+        report.baseline_aic_cached = aic_cached_for(
+            rate, cache_read=report.baseline_cache_read,
+            cache_write=report.baseline_cache_write, requests=report.turns,
+        )
+        report.compressed_aic_cached = aic_cached_for(
+            rate, cache_read=report.cache_read_tokens,
+            cache_write=report.cache_write_tokens, requests=report.turns,
+        )
     report.ok = not report.violations
     return report
 
@@ -192,6 +215,19 @@ def render_report(r: VerifyReport) -> str:
         "  note: requests count is unchanged by compression; under purely",
         "  per-request AIC metering the win is context headroom, not credits.",
     ]
+    if r.baseline_aic_cached is not None and r.compressed_aic_cached is not None:
+        lines += [
+            "",
+            "  cache-aware pricing (cached prefix reads billed at the cache tier;",
+            "  checkpoint recompressions billed as the cache re-writes they are):",
+            f"  AIC baseline  (cached)  : {r.baseline_aic_cached:,.1f} AIC"
+            f" (${usd_for(r.baseline_aic_cached):,.2f})",
+            f"  AIC compressed (cached) : {r.compressed_aic_cached:,.1f} AIC"
+            f" (${usd_for(r.compressed_aic_cached):,.2f})",
+            f"  AIC saved     (cached)  : "
+            f"{r.baseline_aic_cached - r.compressed_aic_cached:,.1f} AIC"
+            f" ({pct(r.baseline_aic_cached, r.compressed_aic_cached)})",
+        ]
     if r.model_cap is not None:
         lines += [
             "",

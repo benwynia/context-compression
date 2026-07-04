@@ -75,6 +75,12 @@ def main(argv: list[str] | None = None) -> int:
     pp.add_argument("--budget", default="60k")
     pp.add_argument("--port", type=int, default=8790)
     pp.add_argument("--host", default="127.0.0.1")
+    pp.add_argument("--shadow", action="store_true",
+                    help="forward requests UNTOUCHED; measure would-be savings on "
+                         "the side (zero-risk pilot; read them at GET /stats)")
+    pp.add_argument("--record", default=None, metavar="DIR",
+                    help="capture each conversation as a replayable session file "
+                         "for `ctxc verify`")
 
     args = p.parse_args(argv)
     budget = _parse_budget(args.budget)
@@ -129,7 +135,10 @@ def main(argv: list[str] | None = None) -> int:
 
         from .proxy import build_app
 
-        app = build_app(args.upstream, budget)
+        app = build_app(args.upstream, budget, shadow=args.shadow, record_dir=args.record)
+        mode = "SHADOW (traffic untouched, measuring only)" if args.shadow else "ACTIVE"
+        print(f"ctxc proxy: {mode}; savings at http://{args.host}:{args.port}/stats",
+              file=sys.stderr)
         uvicorn.run(app, host=args.host, port=args.port)
         return 0
 

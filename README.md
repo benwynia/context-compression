@@ -101,6 +101,58 @@ a cache-health signal, not a priced quantity: it tells you what checkpoint
 recompression costs in provider-cache terms even though it doesn't change the
 AIC bill.
 
+## Getting a number you can defend
+
+Do **not** quote the demo's percentage — it is measured on synthetic data. The
+kit for measuring on *your* traffic, in increasing order of rigor:
+
+1. **Shadow mode (zero risk).** `ctxc proxy --upstream URL --budget 60k
+   --shadow --record ./sessions`. Traffic is forwarded **untouched**; the
+   would-be savings are measured on the side and aggregated at `GET /stats`
+   (including the upstream's own reported `usage` — provider-billed numbers,
+   not tiktoken estimates, and the real cache-hit rate). Compression failures
+   in shadow mode never fail a request; they're counted in `compress_errors`.
+2. **Replay recorded sessions.** `--record` writes each conversation as a
+   session file; `ctxc verify sessions/<f>.json --budget 60k` replays it with
+   full invariant checking and per-turn accounting.
+3. **Price it three ways.** Token savings ≠ dollar savings. With cache-tier
+   rates set (`per_1m_cache_read` / `per_1m_cache_write` in the rates file),
+   the report adds a cache-aware line where checkpoint recompressions are
+   billed as the cache re-writes they really are.
+
+What to expect (synthetic, haiku-class token rates, 40k budget — run your own):
+
+| session depth | tokens saved | flat per-token AIC | cache-aware AIC |
+|---|---|---|---|
+| ~70k-token chain | 32.9% | 25.7% | **0.3%** |
+| ~150k-token chain | 61.8% | 54.3% | **12.4%** |
+| ~300k-token chain | 80.1% | 75.1% | **35.0%** |
+
+The honest reading: against a *perfectly cached* baseline, short sessions save
+almost no money — compression's dollar value comes from **long sessions**
+(where avoided reads dwarf checkpoint re-writes), from **imperfect real-world
+caching** (provider caches expire in minutes; idle gaps mean the true baseline
+sits between the flat and cache-aware columns — shadow mode's `cached_tokens`
+measures where), from **request-metered billing** (savings show up as context
+headroom, not credits), and from **sessions that outlive the model's context
+cap** — where the uncompressed baseline doesn't cost more, it simply dies.
+
+## Known limitations
+
+- **Quality is not measured.** The harness proves compression is structurally
+  safe, budget-bounded, cache-stable, and cheap — not that the agent performs
+  identically on compressed context. Pilot with shadow mode → small active
+  group, and watch task outcomes/turn counts.
+- Token counts are tiktoken-based: exact for GPT-family, approximate for other
+  models behind an OpenAI-compatible endpoint (the `/stats` upstream `usage`
+  numbers are exact).
+- Responses are buffered, not streamed (`stream: true` clients will wait for
+  the full generation).
+- Session state is in-memory: run one proxy worker; a restart just means one
+  extra checkpoint per live conversation (correctness unaffected).
+- The proxy adds no auth of its own — deploy it inside your network boundary.
+- The default AIC rate table is illustrative; plug in real rates via `--rates`.
+
 ## Library use
 
 ```python

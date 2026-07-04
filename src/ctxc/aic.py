@@ -24,6 +24,16 @@ class AicRate:
     per_request: float = 0.0
     per_1m_input: float = 0.0
     per_1m_output: float = 0.0
+    # Optional cache-tier rates (per-token upstreams price cached prefix reads
+    # at ~10% and cache writes at ~125% of input). When either is nonzero, the
+    # verify report adds a cache-aware cost line — token savings that trade
+    # cheap cache reads for recompression cache writes stop looking free.
+    per_1m_cache_read: float = 0.0
+    per_1m_cache_write: float = 0.0
+
+    @property
+    def cache_aware(self) -> bool:
+        return bool(self.per_1m_cache_read or self.per_1m_cache_write)
 
 
 # Illustrative haiku-class token metering (~$1/M in, ~$5/M out) plus one AIC per
@@ -38,6 +48,19 @@ def aic_for(
         requests * rate.per_request
         + input_tokens / 1_000_000 * rate.per_1m_input
         + output_tokens / 1_000_000 * rate.per_1m_output
+    )
+
+
+def aic_cached_for(
+    rate: AicRate, *, cache_read: int, cache_write: int, requests: int = 1
+) -> float:
+    """Cache-aware prompt cost: every prompt token is either a cache read (the
+    unchanged prefix) or a cache write (appended/rewritten). This is where a
+    checkpoint's recompression shows up as the re-write it really is."""
+    return (
+        requests * rate.per_request
+        + cache_read / 1_000_000 * rate.per_1m_cache_read
+        + cache_write / 1_000_000 * rate.per_1m_cache_write
     )
 
 
