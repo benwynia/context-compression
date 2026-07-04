@@ -114,7 +114,9 @@ kit for measuring on *your* traffic, in increasing order of rigor:
    would-be savings are measured on the side and aggregated at `GET /stats`
    (including the upstream's own reported `usage` — provider-billed numbers,
    not tiktoken estimates, and the real cache-hit rate). Compression failures
-   in shadow mode never fail a request; they're counted in `compress_errors`.
+   never fail a request in ANY mode — the original is forwarded, the failure
+   is counted in `compress_errors` and named in an `x-ctxc-compress-error`
+   response header.
 2. **Replay recorded sessions.** `--record` writes each conversation as a
    session file; `ctxc verify sessions/<f>.json --budget 60k` replays it with
    full invariant checking and per-turn accounting.
@@ -157,14 +159,27 @@ cap** — where the uncompressed baseline doesn't cost more, it simply dies.
   safe, budget-bounded, cache-stable, and cheap — not that the agent performs
   identically on compressed context. Pilot with shadow mode → small active
   group, and watch task outcomes/turn counts.
-- Token counts are tiktoken-based: exact for GPT-family, approximate for other
-  models behind an OpenAI-compatible endpoint (the `/stats` upstream `usage`
-  numbers are exact).
+- Token counts are tiktoken-based: exact for GPT-family, approximate (±10–20%)
+  for other models behind an OpenAI-compatible endpoint. **Leave margin**:
+  set `--budget` at least ~15% below the model's context cap; the `/stats`
+  upstream `usage` numbers show your real skew. Run `ctxc smoke` against your
+  provider once (~one cent) to confirm it accepts compressed chains.
 - Upstream-reported usage isn't parsed on streamed responses (it rides in the
   final SSE chunk); token accounting for streamed turns uses local counts.
-- Session state is in-memory: run one proxy worker; a restart just means one
-  extra checkpoint per live conversation (correctness unaffected).
-- The proxy adds no auth of its own — deploy it inside your network boundary.
+- **Single-user, localhost design.** Session state is in-memory (one uvicorn
+  worker; a restart costs one extra checkpoint per live conversation), the
+  proxy adds no auth of its own, and `/stats` endpoints are open — one proxy
+  per engineer inside the network boundary is the supported shape. Shared
+  multi-user deployment is explicitly out of scope today.
+- `--record` transcripts are redacted by default (pattern-based: API keys,
+  tokens, connection strings, private keys); redaction is hygiene, not a
+  guarantee — treat recordings as sensitive. `--record-raw` disables it.
+- Unknown message shapes are handled **fail-open**: unrecognized roles (e.g.
+  provider-specific ones) and multimodal content (images in tool results) are
+  never rewritten or evicted, and a request compression can't fit is forwarded
+  uncompressed with an `x-ctxc-compress-error` header rather than failed.
+- Windows is untested (pure Python, expected to work — the docs' shell
+  snippets assume Linux/macOS).
 - The default AIC rate table is illustrative; plug in real rates via `--rates`.
 
 ## Library use

@@ -51,6 +51,10 @@ git clone https://github.com/benwynia/context-compression
 cd context-compression
 uv sync
 uv run ctxc demo          # should print "ctxc verify — OK"
+
+# optional but recommended (~one cent): confirm your provider accepts
+# compressed chains (digest message, truncation markers, tool pairing)
+uv run ctxc smoke --upstream $UP --model <your-model>
 ```
 
 ## 2. Start the three proxies (three terminals, or `&` each)

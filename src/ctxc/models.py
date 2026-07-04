@@ -31,6 +31,25 @@ def copy_chain(messages: list[Message]) -> list[Message]:
     return [dict(m) for m in messages]
 
 
+# Roles compression understands. "developer" is OpenAI's newer system-role
+# replacement and is treated exactly like system (protected head). Anything
+# else is OPAQUE: fail-open — validation ignores it, truncation/dedupe skip
+# it, and eviction refuses to remove a round containing it. Compression gets
+# more conservative on shapes it doesn't understand, never more aggressive.
+HEAD_ROLES = ("system", "developer")
+KNOWN_ROLES = ("system", "developer", "user", "assistant", "tool")
+
+
+def is_opaque(msg: Message) -> bool:
+    return msg.get("role") not in KNOWN_ROLES
+
+
+def has_plain_text_content(msg: Message) -> bool:
+    """True when content is a plain string we may rewrite. List-form content
+    can carry images (screenshots in tool results) — never rewrite those."""
+    return isinstance(msg.get("content"), str)
+
+
 def content_text(msg: Message) -> str:
     """Flatten a message's content to text (string or list-of-parts form)."""
     c = msg.get("content")
@@ -73,12 +92,14 @@ def validate_chain(messages: list[Message]) -> list[str]:
     """Return a list of structural violations (empty = valid).
 
     Rules:
-    - system messages only at the head;
+    - system/developer messages only at the head;
     - every tool message answers a tool_call issued by the most recent assistant
       message (no orphans, no answering across a later non-tool message);
     - every tool_call is answered before the next non-tool message (except when
       it is the final message of the chain — a request mid-round is legal);
-    - roles are one of system/user/assistant/tool.
+    - unknown roles are OPAQUE: transparent to validation (fail-open), so a
+      provider dialect we haven't seen can never make compression reject or
+      crash a request.
     """
     errors: list[str] = []
     seen_non_system = False
@@ -86,12 +107,11 @@ def validate_chain(messages: list[Message]) -> list[str]:
 
     for i, m in enumerate(messages):
         role = m.get("role")
-        if role not in ("system", "user", "assistant", "tool"):
-            errors.append(f"msg[{i}]: unknown role {role!r}")
-            continue
-        if role == "system":
+        if role not in KNOWN_ROLES:
+            continue  # opaque: fail-open
+        if role in HEAD_ROLES:
             if seen_non_system:
-                errors.append(f"msg[{i}]: system message after non-system messages")
+                errors.append(f"msg[{i}]: {role} message after non-{role} messages")
             continue
         seen_non_system = True
 
@@ -123,10 +143,10 @@ def validate_chain(messages: list[Message]) -> list[str]:
 
 
 def head_len(messages: list[Message]) -> int:
-    """Length of the protected head: leading system message(s) plus the first
-    non-system message (the task statement)."""
+    """Length of the protected head: leading system/developer message(s) plus
+    the first non-head message (the task statement)."""
     n = 0
-    while n < len(messages) and messages[n].get("role") == "system":
+    while n < len(messages) and messages[n].get("role") in HEAD_ROLES:
         n += 1
     if n < len(messages):
         n += 1

@@ -126,8 +126,19 @@ def main(argv: list[str] | None = None) -> int:
                          "identical instrumentation")
     pp.add_argument("--record", default=None, metavar="DIR",
                     help="capture each conversation as a replayable session file "
-                         "for `ctxc verify`")
+                         "for `ctxc verify` (secret-looking strings are redacted)")
+    pp.add_argument("--record-raw", action="store_true",
+                    help="disable redaction in --record files (transcripts may "
+                         "contain keys/passwords from tool output — handle with care)")
     _add_summarizer_flags(pp)
+
+    pk = sub.add_parser("smoke", help="one-cent live check that a real provider "
+                                      "accepts compressed chains")
+    pk.add_argument("--upstream", required=True)
+    pk.add_argument("--model", required=True)
+    pk.add_argument("--key-env", default="OPENAI_API_KEY",
+                    help="env var holding the provider API key")
+    pk.add_argument("--budget", default="800")
 
     args = p.parse_args(argv)
     budget = _parse_budget(args.budget) if hasattr(args, "budget") else 0
@@ -180,6 +191,14 @@ def main(argv: list[str] | None = None) -> int:
         print(render_report(report))
         return 0 if report.ok else 1
 
+    if args.cmd == "smoke":
+        from .smoke import run_smoke
+
+        result = run_smoke(args.upstream, args.model, key_env=args.key_env,
+                           budget=budget)
+        print(json.dumps(result, indent=2))
+        return 0 if result["ok"] else 1
+
     if args.cmd == "scrape":
         from .ab import scrape_row
 
@@ -224,7 +243,7 @@ def main(argv: list[str] | None = None) -> int:
 
         app = build_app(args.upstream, budget, config=_compress_config(args),
                         shadow=args.shadow, passthrough=args.passthrough,
-                        record_dir=args.record)
+                        record_dir=args.record, record_raw=args.record_raw)
         mode = ("PASSTHROUGH (control arm: no compression, measuring only)"
                 if args.passthrough
                 else "SHADOW (traffic untouched, measuring only)" if args.shadow

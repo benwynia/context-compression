@@ -35,6 +35,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 from collections import OrderedDict
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -48,6 +49,7 @@ from starlette.routing import Route
 
 from .compressor import BudgetImpossible, CompressConfig
 from .models import fingerprint
+from .redact import redact_messages
 from .session import SessionCompressor
 from .tokens import TokenCounter
 
@@ -100,6 +102,7 @@ def build_app(
     shadow: bool = False,
     passthrough: bool = False,
     record_dir: str | Path | None = None,
+    record_raw: bool = False,
 ) -> Starlette:
     if shadow and passthrough:
         raise ValueError("shadow and passthrough are mutually exclusive modes")
@@ -116,27 +119,38 @@ def build_app(
     stats = {
         "requests": 0,
         "compress_errors": 0,
+        "session_resets": 0,       # non-append histories: silent cache rewrites
+        "redactions": 0,           # secret-looking strings scrubbed from records
         "original_tokens": 0,
         "emitted_tokens": 0,
         "upstream_prompt_tokens": 0,
         "upstream_completion_tokens": 0,
         "upstream_cached_tokens": 0,
+        "compress_ms_total": 0.0,  # CPU time inside compression/counting
+        "compress_ms_max": 0.0,
     }
     # per-session (= per-task in an A/B run) attribution; evicted with the LRU
     session_stats: dict[str, dict] = {}
 
     def _fresh_session_stats() -> dict:
-        return {k: 0 for k in stats} | {"checkpoints": 0}
+        return {k: 0 for k in stats if k != "compress_ms_max"} | {
+            "checkpoints": 0, "compress_ms_max": 0.0,
+        }
 
-    def _record(key: str, messages: list) -> None:
+    def _record(key: str, messages: list) -> int:
         """Each request carries the FULL history, so overwriting with the latest
-        leaves one complete, replayable session file per conversation."""
+        leaves one complete, replayable session file per conversation. Secrets
+        are redacted by default (``record_raw=True`` opts out)."""
         if rec_dir is None:
-            return
+            return 0
+        n = 0
+        if not record_raw:
+            messages, n = redact_messages(messages)
         safe = re.sub(r"[^A-Za-z0-9._-]", "_", key)[:80]
         (rec_dir / f"{safe}.json").write_text(
             json.dumps({"messages": messages}, ensure_ascii=False)
         )
+        return n
 
     async def chat(request: Request) -> Response:
         try:
@@ -151,13 +165,11 @@ def build_app(
         # against the same budget, or a "60k budget" would overshoot the cap.
         tools_tokens = tools_token_count(counter, body["tools"]) if body.get("tools") else 0
         effective_budget = budget - tools_tokens
-        if effective_budget <= 0 and mode == "active":
-            return JSONResponse(
-                {"error": {"type": "ctxc_budget_impossible",
-                           "message": f"tools schemas alone are {tools_tokens} tokens, "
-                                      f"budget is {budget}"}},
-                status_code=400,
-            )
+        compress_error: str | None = None
+        if effective_budget <= 0:
+            # fail-open: an uncompressible request is forwarded as-is (the
+            # provider's cap error beats a proxy-invented 400), and counted.
+            compress_error = f"tools schemas alone are {tools_tokens} tokens, budget is {budget}"
 
         key = _session_key(request, messages)
         entry = sessions.get(key)
@@ -173,10 +185,14 @@ def build_app(
         sessions.move_to_end(key)
         sc, lock = entry
         per = session_stats[key]
-        _record(key, messages)
+        redactions = _record(key, messages)
+        stats["redactions"] += redactions
+        per["redactions"] += redactions
 
         emitted = None
-        if passthrough:
+        resets_before = sc.resets
+        t0 = time.perf_counter()
+        if passthrough or compress_error is not None:
             original_tokens = await asyncio.to_thread(counter.count_chain, messages)
         else:
             try:
@@ -192,15 +208,21 @@ def build_app(
                         )
                     )
             except BudgetImpossible as e:
-                if not shadow:
-                    return JSONResponse(
-                        {"error": {"type": "ctxc_budget_impossible", "message": str(e)}},
-                        status_code=400,
-                    )
-                # shadow must be zero-risk: log the failure, forward the original
-                stats["compress_errors"] += 1
-                per["compress_errors"] += 1
+                # fail-open in EVERY mode: a compression failure must never
+                # fail the request — forward the original and account for it
+                compress_error = str(e)
                 original_tokens = counter.count_chain(messages)
+        compress_ms = (time.perf_counter() - t0) * 1000.0
+        if compress_error is not None:
+            stats["compress_errors"] += 1
+            per["compress_errors"] += 1
+        reset_delta = sc.resets - resets_before
+        stats["session_resets"] += reset_delta
+        per["session_resets"] += reset_delta
+        stats["compress_ms_total"] += compress_ms
+        per["compress_ms_total"] += compress_ms
+        stats["compress_ms_max"] = max(stats["compress_ms_max"], compress_ms)
+        per["compress_ms_max"] = max(per["compress_ms_max"], compress_ms)
 
         emitted_tokens = counter.count_chain(emitted) if emitted is not None else None
         if mode == "active" and emitted is not None:
@@ -242,6 +264,8 @@ def build_app(
             out["x-ctxc-original-tokens"] = str(original_tokens)
             if emitted_tokens is not None:
                 out["x-ctxc-emitted-tokens"] = str(emitted_tokens)
+            if compress_error is not None:
+                out["x-ctxc-compress-error"] = compress_error[:200]
             return out
 
         if body.get("stream"):

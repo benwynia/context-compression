@@ -16,6 +16,8 @@ from .models import (
     Message,
     content_text,
     fingerprint,
+    has_plain_text_content,
+    is_opaque,
     round_starts,
     set_content_text,
 )
@@ -50,6 +52,8 @@ def truncate_tool_results(
     for i in range(start, min(end, len(msgs))):
         if msgs[i].get("role") != "tool":
             continue
+        if not has_plain_text_content(msgs[i]):
+            continue  # list-form content may carry images — never rewrite it
         text = content_text(msgs[i])
         cap = error_max_chars if error_re.search(text) else max_chars
         new, did = truncate_text(text, cap)
@@ -73,13 +77,13 @@ def elide_duplicate_results(msgs: list[Message], start: int, end: int) -> bool:
     end = min(end, len(msgs))
     last_seen: dict[str, int] = {}
     for i in range(start, end):
-        if msgs[i].get("role") == "tool":
+        if msgs[i].get("role") == "tool" and has_plain_text_content(msgs[i]):
             text = content_text(msgs[i])
             if text != DUPLICATE_MARKER:
                 last_seen[fingerprint(text)] = i
     changed = False
     for i in range(start, end):
-        if msgs[i].get("role") != "tool":
+        if msgs[i].get("role") != "tool" or not has_plain_text_content(msgs[i]):
             continue
         text = content_text(msgs[i])
         if text == DUPLICATE_MARKER:
@@ -189,6 +193,11 @@ def evict_rounds(
         if not starts:  # range holds only tool messages: nothing evictable here
             return msgs, digest_lines, evicted
         r_end = starts[1] if len(starts) > 1 else end
+        if any(is_opaque(m) for m in msgs[starts[0]:r_end]):
+            # fail-open: a round carrying a message shape we don't understand
+            # is never evicted — its content might be load-bearing (provider
+            # control messages, unknown modalities). Eviction stops here.
+            return msgs, digest_lines, evicted
         digest_lines.append(digest_round(msgs, starts[0], r_end))
         msgs = msgs[: starts[0]] + msgs[r_end:]
         end -= r_end - starts[0]
