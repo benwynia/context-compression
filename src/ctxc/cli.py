@@ -139,6 +139,12 @@ def main(argv: list[str] | None = None) -> int:
     pi.add_argument("--out", required=True, metavar="DIR",
                     help="directory for the converted session .json file(s)")
 
+    pf = sub.add_parser("fleet", help="sweep a folder of transcripts: how would "
+                                      "each session have done under compression?")
+    pf.add_argument("root", help="directory to walk (e.g. ~/.claude/projects)")
+    pf.add_argument("--budget", default="60k")
+    pf.add_argument("--limit", type=int, default=None, help="max files to process")
+
     pb = sub.add_parser("probe", help="retention probes: plant facts, compress, "
                                       "measure survival (and retrieval with --live)")
     pb.add_argument("session")
@@ -226,6 +232,13 @@ def main(argv: list[str] | None = None) -> int:
             path = out / f"{safe}.json"
             path.write_text(json.dumps({"messages": msgs}, ensure_ascii=False))
             print(f"wrote {path}  ({len(msgs)} messages)", file=sys.stderr)
+        return 0
+
+    if args.cmd == "fleet":
+        from .fleet import render_fleet, sweep
+
+        report = sweep(args.root, budget, limit=args.limit)
+        print(render_fleet(report))
         return 0
 
     if args.cmd == "probe":

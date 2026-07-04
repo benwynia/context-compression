@@ -153,3 +153,34 @@ def test_cli_import_and_probe(tmp_path, capsys):
     session.write_text(json.dumps({"messages": synth_session(rounds=20, seed=4)}))
     assert main(["probe", str(session), "--budget", "8k", "--n", "5"]) == 0
     assert "survival:" in capsys.readouterr().out
+
+
+def test_fleet_sweep(tmp_path, capsys):
+    from ctxc.cli import main
+    from ctxc.fleet import render_fleet, sweep
+
+    # one big ctxc session file (engages), one tiny (skipped), one broken
+    big = tmp_path / "proj" / "big.json"
+    big.parent.mkdir()
+    big.write_text(json.dumps({"messages": synth_session(rounds=25, seed=4)}))
+    (tmp_path / "proj" / "tiny.json").write_text(
+        json.dumps({"messages": [{"role": "user", "content": "hi"}]})
+    )
+    (tmp_path / "proj" / "broken.json").write_text("{not json")
+    # a claude-code jsonl transcript alongside
+    jl = tmp_path / "proj" / "agent-q.jsonl"
+    jl.write_text("\n".join(json.dumps(x) for x in _claude_code_lines()))
+
+    report = sweep(tmp_path, budget=20_000)
+    assert report.skipped_unreadable == 1
+    assert report.skipped_small >= 1  # tiny.json (agent-q has 4 msgs -> also small)
+    names = [r.name for r in report.rows]
+    assert "big" in names
+    big_row = next(r for r in report.rows if r.name == "big")
+    assert big_row.engaged and big_row.checkpoints >= 1
+    assert big_row.saved_pct > 0 and big_row.ok
+    text = render_fleet(report)
+    assert "engagement:" in text and "fleet prompt tokens" in text
+
+    assert main(["fleet", str(tmp_path), "--budget", "20k"]) == 0
+    assert "engagement:" in capsys.readouterr().out
