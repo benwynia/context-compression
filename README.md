@@ -40,6 +40,9 @@ one (a cache read).
 ```
 ctxc verify session.json --budget 60k          # exit 1 on any violation
 ctxc demo --budget 40k --model-cap 50k
+ctxc import ~/.claude/projects/<p>/<s>.jsonl --out sessions/   # real transcripts in
+ctxc probe sessions/<s>.json --budget 60k      # retention profile (add --live
+                                               # to test model retrieval, ~1c)
 ```
 
 The verifier replays the session one request per assistant turn (exactly a

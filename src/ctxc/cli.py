@@ -132,6 +132,26 @@ def main(argv: list[str] | None = None) -> int:
                          "contain keys/passwords from tool output — handle with care)")
     _add_summarizer_flags(pp)
 
+    pi = sub.add_parser("import", help="convert real transcripts (Claude Code "
+                                       "JSONL, claude.ai export) to session files")
+    pi.add_argument("source", help="a .jsonl session/subagent transcript, a "
+                                   "conversations.json export, or a session file")
+    pi.add_argument("--out", required=True, metavar="DIR",
+                    help="directory for the converted session .json file(s)")
+
+    pb = sub.add_parser("probe", help="retention probes: plant facts, compress, "
+                                      "measure survival (and retrieval with --live)")
+    pb.add_argument("session")
+    pb.add_argument("--budget", default="60k")
+    pb.add_argument("--n", type=int, default=8, help="number of probes")
+    pb.add_argument("--seed", type=int, default=0)
+    pb.add_argument("--live", action="store_true",
+                    help="also ask a real model to retrieve each fact (paired "
+                         "compressed vs original)")
+    pb.add_argument("--upstream", default="https://api.openai.com")
+    pb.add_argument("--model", default="gpt-4o-mini")
+    pb.add_argument("--key-env", default="OPENAI_API_KEY")
+
     pk = sub.add_parser("smoke", help="one-cent live check that a real provider "
                                       "accepts compressed chains")
     pk.add_argument("--upstream", required=True)
@@ -190,6 +210,52 @@ def main(argv: list[str] | None = None) -> int:
         report = verify_session(messages, budget, counter=counter, model_cap=cap)
         print(render_report(report))
         return 0 if report.ok else 1
+
+    if args.cmd == "import":
+        from .ingest import detect_and_convert
+
+        out = Path(args.out)
+        out.mkdir(parents=True, exist_ok=True)
+        sessions = detect_and_convert(args.source)
+        for name, msgs in sessions.items():
+            safe = "".join(c if c.isalnum() or c in "._-" else "_" for c in name)[:80]
+            path = out / f"{safe}.json"
+            path.write_text(json.dumps({"messages": msgs}, ensure_ascii=False))
+            print(f"wrote {path}  ({len(msgs)} messages)", file=sys.stderr)
+        return 0
+
+    if args.cmd == "probe":
+        import os
+
+        import httpx
+
+        from .probe import render_probe_report, run_probes
+
+        messages = _load_messages(args.session)
+        ask = None
+        if args.live:
+            base = args.upstream.rstrip("/")
+            if not base.endswith("/v1"):
+                base += "/v1"
+            key = os.environ.get(args.key_env, "")
+            http = httpx.Client(timeout=60.0)
+
+            def ask(context, question, _base=base, _key=key, _http=http):
+                body = {"model": args.model, "temperature": 0,
+                        "max_completion_tokens": 30,
+                        "messages": context + [{"role": "user", "content": question}]}
+                headers = {"authorization": f"Bearer {_key}"} if _key else {}
+                r = _http.post(f"{_base}/chat/completions", json=body, headers=headers)
+                if r.status_code == 400 and "max_completion_tokens" in r.text:
+                    body.pop("max_completion_tokens")
+                    body["max_tokens"] = 30
+                    r = _http.post(f"{_base}/chat/completions", json=body, headers=headers)
+                r.raise_for_status()
+                return (r.json()["choices"][0]["message"].get("content") or "")
+
+        report = run_probes(messages, budget, n=args.n, seed=args.seed, ask=ask)
+        print(render_probe_report(report))
+        return 0
 
     if args.cmd == "smoke":
         from .smoke import run_smoke
