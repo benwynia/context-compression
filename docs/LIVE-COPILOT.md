@@ -30,7 +30,9 @@ uv run ctxc proxy --upstream https://api.your-provider.com \
 ```
 
 Shadow = requests pass through **untouched** while ctxc measures what it
-*would* save. Zero risk while trust builds.
+*would* save. Zero risk while trust builds. The `--record` transcripts are
+**redacted by default** (API keys, tokens, connection strings) — still treat
+them as sensitive; redaction is pattern-based hygiene, not a guarantee.
 
 **2. Point a Copilot BYOK model at it.** In VS Code: Copilot Chat → model
 picker → **Manage models…** → add a provider. Pick the **OpenAI-compatible /
@@ -64,7 +66,9 @@ compression is real — the engineer should note anything that feels off:
 
 - the agent re-reading files it already read (evicted context),
 - forgetting earlier instructions or decisions,
-- any request failing with `ctxc_budget_impossible` (a huge single message).
+- responses carrying an `x-ctxc-compress-error` header (compression couldn't
+  meet the budget, so the original was forwarded untouched — the request never
+  fails, but frequent occurrences mean the budget is set too low).
 
 `--record` keeps every session replayable: `uv run ctxc verify
 ~/ctxc-sessions/<file>.json --budget 60k` reproduces exactly what compression

@@ -34,6 +34,10 @@ class SessionCompressor:
         self.config = config or CompressConfig()
         self.counter = counter or TokenCounter()
         self.checkpoints = 0
+        # non-append-only histories (user edited an earlier turn, retries,
+        # session-key collisions) force a full rebuild — each one is a silent
+        # cache rewrite, so it must be countable, not invisible
+        self.resets = 0
         self._source: list[Message] = []   # last full history seen from the client
         self._emitted: list[Message] = []  # what we sent upstream for it
         # Set when the hysteresis target proved unreachable: skip the doomed
@@ -59,6 +63,7 @@ class SessionCompressor:
         else:
             if self._source:  # edited past: previous emission is unusable
                 self._emitted = []
+                self.resets += 1
             candidate = copy_chain(history)
 
         if self.counter.count_chain(candidate) > budget:

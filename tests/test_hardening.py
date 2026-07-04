@@ -140,21 +140,6 @@ async def test_proxy_counts_tools_against_budget(counter):
 
 
 @pytest.mark.anyio
-async def test_proxy_rejects_when_tools_alone_exceed_budget():
-    received: list[dict] = []
-    app = build_app("http://u", budget=200, client=asgi_client(fake_upstream(received)))
-    tools = [{"type": "function", "function": {"name": "t", "description": "x " * 2000}}]
-    async with asgi_client(app) as client:
-        resp = await client.post(
-            "/v1/chat/completions",
-            json={"model": "gpt-5", "messages": [{"role": "user", "content": "hi"}], "tools": tools},
-        )
-    assert resp.status_code == 400
-    assert resp.json()["error"]["type"] == "ctxc_budget_impossible"
-    assert not received
-
-
-@pytest.mark.anyio
 async def test_proxy_upstream_already_has_v1():
     received: list[dict] = []
     app = build_app("http://u/v1", budget=1_000_000, client=asgi_client(fake_upstream(received)))
