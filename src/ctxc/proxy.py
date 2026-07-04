@@ -24,8 +24,10 @@ conversations with identical openings need the header). ``--record DIR``
 captures each conversation as a replayable session file for ``ctxc verify``.
 ``GET /stats`` aggregates measured savings, including the upstream's own
 reported ``usage`` (provider-billed numbers, not tiktoken estimates).
-Responses come back unchanged plus ``x-ctxc-*`` accounting headers.
-Non-streaming responses only (``stream: true`` is forwarded but buffered).
+Responses come back unchanged plus ``x-ctxc-*`` accounting headers; streaming
+(``stream: true``) responses are passed through chunk-by-chunk, so chat UIs
+render tokens as they arrive (upstream-reported usage isn't parsed for
+streamed turns — token accounting for those uses local counts).
 """
 
 from __future__ import annotations
@@ -39,8 +41,9 @@ from pathlib import Path
 
 import httpx
 from starlette.applications import Starlette
+from starlette.background import BackgroundTask
 from starlette.requests import Request
-from starlette.responses import JSONResponse, Response
+from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 
 from .compressor import BudgetImpossible, CompressConfig
@@ -214,33 +217,53 @@ def build_app(
         url = f"{upstream}{path}"
         if request.url.query:  # forward query params (api-version=… etc.) verbatim
             url = f"{url}?{request.url.query}"
+
+        def _account(usage: dict) -> None:
+            increments = {
+                "requests": 1,
+                "original_tokens": original_tokens,
+                "emitted_tokens": emitted_tokens if emitted_tokens is not None else original_tokens,
+                "upstream_prompt_tokens": usage["prompt_tokens"],
+                "upstream_completion_tokens": usage["completion_tokens"],
+                "upstream_cached_tokens": usage["cached_tokens"],
+            }
+            for k, v in increments.items():
+                stats[k] += v
+                per[k] += v
+            per["checkpoints"] = sc.checkpoints
+
+        def _out_headers(upstream_headers) -> dict:
+            out = {
+                k: v
+                for k, v in upstream_headers.items()
+                if k.lower() not in _HOP_BY_HOP and k.lower() != "content-encoding"
+            }
+            out["x-ctxc-mode"] = mode
+            out["x-ctxc-original-tokens"] = str(original_tokens)
+            if emitted_tokens is not None:
+                out["x-ctxc-emitted-tokens"] = str(emitted_tokens)
+            return out
+
+        if body.get("stream"):
+            # SSE passthrough: chunks reach the client as they arrive (a chat
+            # UI must not freeze behind a buffered response). Usage rides in
+            # the final SSE chunk, which we don't parse — token accounting for
+            # streamed turns uses local counts only.
+            req = http.build_request("POST", url, json=body, headers=fwd_headers)
+            upstream_resp = await http.send(req, stream=True)
+            _account({"prompt_tokens": 0, "completion_tokens": 0, "cached_tokens": 0})
+            return StreamingResponse(
+                upstream_resp.aiter_raw(),
+                status_code=upstream_resp.status_code,
+                headers=_out_headers(upstream_resp.headers),
+                background=BackgroundTask(upstream_resp.aclose),
+            )
+
         resp = await http.post(url, json=body, headers=fwd_headers)
-
-        usage = _usage_from(resp.content)
-        increments = {
-            "requests": 1,
-            "original_tokens": original_tokens,
-            "emitted_tokens": emitted_tokens if emitted_tokens is not None else original_tokens,
-            "upstream_prompt_tokens": usage["prompt_tokens"],
-            "upstream_completion_tokens": usage["completion_tokens"],
-            "upstream_cached_tokens": usage["cached_tokens"],
-        }
-        for k, v in increments.items():
-            stats[k] += v
-            per[k] += v
-        per["checkpoints"] = sc.checkpoints
-
-        out_headers = {
-            k: v
-            for k, v in resp.headers.items()
-            if k.lower() not in _HOP_BY_HOP and k.lower() != "content-encoding"
-        }
-        out_headers["x-ctxc-mode"] = mode
-        out_headers["x-ctxc-original-tokens"] = str(original_tokens)
-        if emitted_tokens is not None:
-            out_headers["x-ctxc-emitted-tokens"] = str(emitted_tokens)
+        _account(_usage_from(resp.content))
         return Response(
-            content=resp.content, status_code=resp.status_code, headers=out_headers
+            content=resp.content, status_code=resp.status_code,
+            headers=_out_headers(resp.headers),
         )
 
     async def health(_: Request) -> Response:

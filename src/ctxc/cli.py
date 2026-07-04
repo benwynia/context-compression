@@ -102,6 +102,16 @@ def main(argv: list[str] | None = None) -> int:
     pa.add_argument("--model", help="model name to look up in --rates")
     pa.add_argument("--json", dest="json_out", help="also write the full report as JSON")
 
+    ps = sub.add_parser("scrape", help="write one per-task result row from a running proxy")
+    ps.add_argument("--proxy", required=True, help="proxy base url, e.g. http://localhost:8790")
+    ps.add_argument("--task-id", required=True, help="the x-ctxc-session-id the task ran under")
+    ps.add_argument("--out", required=True, metavar="DIR", help="results dir for this arm")
+
+    pr = sub.add_parser("resolve", help="merge grader verdicts into result rows")
+    pr.add_argument("results_dir")
+    pr.add_argument("--ids-file", required=True,
+                    help="file with one RESOLVED task_id per line (from the grader)")
+
     pp = sub.add_parser("proxy", help="run the live compression proxy")
     pp.add_argument("--upstream", required=True)
     pp.add_argument("--budget", default="60k")
@@ -169,6 +179,29 @@ def main(argv: list[str] | None = None) -> int:
         report = verify_session(messages, budget, counter=counter, model_cap=cap)
         print(render_report(report))
         return 0 if report.ok else 1
+
+    if args.cmd == "scrape":
+        from .ab import scrape_row
+
+        row = scrape_row(args.proxy, args.task_id)
+        out = Path(args.out)
+        out.mkdir(parents=True, exist_ok=True)
+        path = out / f"{args.task_id}.json"
+        path.write_text(json.dumps(row, indent=1))
+        print(f"wrote {path}", file=sys.stderr)
+        return 0
+
+    if args.cmd == "resolve":
+        from .ab import mark_resolved
+
+        ids = {
+            line.strip()
+            for line in Path(args.ids_file).read_text().splitlines()
+            if line.strip()
+        }
+        n = mark_resolved(args.results_dir, ids)
+        print(f"updated {n} rows ({len(ids)} resolved ids)", file=sys.stderr)
+        return 0
 
     if args.cmd == "ab":
         from dataclasses import asdict

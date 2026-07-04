@@ -34,7 +34,54 @@ from dataclasses import dataclass, field
 from math import comb
 from pathlib import Path
 
+import httpx
+
 from .aic import AicRate, aic_cached_for, aic_for, usd_for
+
+
+def scrape_row(
+    proxy_url: str, task_id: str, client: httpx.Client | None = None
+) -> dict:
+    """Build one result row from a running proxy's ``/stats/sessions``.
+
+    ``prompt_tokens`` prefers the upstream's own reported usage (what was
+    actually billed); it falls back to the local emitted count when the
+    upstream reported nothing (e.g. streamed turns). ``resolved`` is left
+    False — merge the grader verdict in afterwards with :func:`mark_resolved`.
+    """
+    http = client or httpx.Client(timeout=30.0)
+    data = http.get(proxy_url.rstrip("/") + "/stats/sessions").json()
+    row = data["sessions"].get(task_id)
+    if row is None:
+        raise KeyError(
+            f"no session {task_id!r} on {proxy_url} "
+            f"(known: {sorted(data['sessions'])[:5]}…)"
+        )
+    out = {
+        "task_id": task_id,
+        "resolved": False,
+        "requests": row["requests"],
+        "prompt_tokens": row["upstream_prompt_tokens"] or row["emitted_tokens"],
+        "output_tokens": row["upstream_completion_tokens"],
+        "checkpoints": row["checkpoints"],
+        "original_tokens": row["original_tokens"],
+        "emitted_tokens": row["emitted_tokens"],
+    }
+    if row.get("upstream_cached_tokens"):
+        out["cache_read"] = row["upstream_cached_tokens"]
+    return out
+
+
+def mark_resolved(results_dir: str | Path, resolved_ids: set[str]) -> int:
+    """Set ``resolved`` on every row file from the grader's id list (True when
+    listed, False otherwise — grader truth for all). Returns rows updated."""
+    n = 0
+    for f in sorted(Path(results_dir).glob("*.json")):
+        row = json.loads(f.read_text())
+        row["resolved"] = row["task_id"] in resolved_ids
+        f.write_text(json.dumps(row, indent=1))
+        n += 1
+    return n
 
 
 def load_results(path: str | Path) -> dict[str, dict]:
