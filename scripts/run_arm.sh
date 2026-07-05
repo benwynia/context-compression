@@ -10,6 +10,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 ARM=$1 PORT=$2 LIST=$3 DIR=$4
 CONFIG="${CONFIG:-$HOME/SWE-agent/config/default.yaml}"
+MODEL="${MODEL:-gpt-5.4-mini}"
+COST_LIMIT="${COST_LIMIT:-1.50}"
 set -a; source .env; set +a
 
 while read -r ID; do
@@ -17,9 +19,9 @@ while read -r ID; do
   echo "=== [$ARM] $ID $(date +%H:%M:%S) ==="
   "$HOME/SWE-agent/.venv/bin/sweagent" run-batch \
     --config "$CONFIG" \
-    --agent.model.name gpt-5.4-mini \
+    --agent.model.name "$MODEL" \
     --agent.model.api_base "http://localhost:$PORT/v1" \
-    --agent.model.per_instance_cost_limit 1.50 \
+    --agent.model.per_instance_cost_limit "$COST_LIMIT" \
     --agent.model.completion_kwargs "{\"extra_headers\":{\"x-ctxc-session-id\":\"$ID\"}}" \
     --instances.type swe_bench --instances.subset lite --instances.split test \
     --instances.filter "$ID" \
