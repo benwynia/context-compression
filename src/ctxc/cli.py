@@ -130,6 +130,11 @@ def main(argv: list[str] | None = None) -> int:
     pp.add_argument("--record-raw", action="store_true",
                     help="disable redaction in --record files (transcripts may "
                          "contain keys/passwords from tool output — handle with care)")
+    pp.add_argument("--advisor", action="store_true",
+                    help="advisory eviction: label tool results with [block tN] "
+                         "markers, offer the model a prune_context tool, apply "
+                         "its directives at checkpoint boundaries (needs a "
+                         "frontier-tier agent model; see RUNG10 results)")
     _add_summarizer_flags(pp)
 
     pi = sub.add_parser("import", help="convert real transcripts (Claude Code "
@@ -314,10 +319,12 @@ def main(argv: list[str] | None = None) -> int:
 
         app = build_app(args.upstream, budget, config=_compress_config(args),
                         shadow=args.shadow, passthrough=args.passthrough,
-                        record_dir=args.record, record_raw=args.record_raw)
+                        record_dir=args.record, record_raw=args.record_raw,
+                        advisor=args.advisor)
         mode = ("PASSTHROUGH (control arm: no compression, measuring only)"
                 if args.passthrough
                 else "SHADOW (traffic untouched, measuring only)" if args.shadow
+                else "ADVISOR (active + model-directed eviction)" if args.advisor
                 else "ACTIVE")
         print(f"ctxc proxy: {mode}; savings at http://{args.host}:{args.port}/stats",
               file=sys.stderr)

@@ -29,10 +29,16 @@ class SessionCompressor:
         budget: int,
         config: CompressConfig | None = None,
         counter: TokenCounter | None = None,
+        pre_checkpoint=None,
     ):
         self.budget = budget
         self.config = config or CompressConfig()
         self.counter = counter or TokenCounter()
+        # Called on the candidate chain right before a checkpoint compresses
+        # it (chain -> chain). The one moment extra rewrites are free — the
+        # prefix is being rebuilt anyway. Contract: must return a copy, never
+        # mutate in place (the candidate aliases the frozen prior emission).
+        self.pre_checkpoint = pre_checkpoint
         self.checkpoints = 0
         # non-append-only histories (user edited an earlier turn, retries,
         # session-key collisions) force a full rebuild — each one is a silent
@@ -67,6 +73,8 @@ class SessionCompressor:
             candidate = copy_chain(history)
 
         if self.counter.count_chain(candidate) > budget:
+            if self.pre_checkpoint is not None:
+                candidate = self.pre_checkpoint(candidate)
             target = max(1, int(budget * self.config.recompress_to))
             result = None
             if not self._target_impossible:
