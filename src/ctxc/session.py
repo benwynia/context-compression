@@ -18,7 +18,10 @@ non-append-only history (edited past) falls back to a from-scratch compress.
 
 from __future__ import annotations
 
+import dataclasses
+
 from .compressor import BudgetImpossible, CompressConfig, compress
+from .guard import ThrashGuard
 from .models import Message, copy_chain
 from .tokens import TokenCounter
 
@@ -30,10 +33,19 @@ class SessionCompressor:
         config: CompressConfig | None = None,
         counter: TokenCounter | None = None,
         pre_checkpoint=None,
+        guard: ThrashGuard | None = None,
     ):
         self.budget = budget
         self.config = config or CompressConfig()
         self.counter = counter or TokenCounter()
+        # thrash guard: churn-based budget escalation + re-read pinning (see
+        # guard.py). Its pin_check composes with any user-supplied one.
+        self.guard = guard
+        if guard is not None:
+            user_check = self.config.pin_check
+            combined = (guard.pin_check if user_check is None else
+                        (lambda t, u=user_check, g=guard.pin_check: u(t) or g(t)))
+            self.config = dataclasses.replace(self.config, pin_check=combined)
         # Called on the candidate chain right before a checkpoint compresses
         # it (chain -> chain). The one moment extra rewrites are free — the
         # prefix is being rebuilt anyway. Contract: must return a copy, never
@@ -66,32 +78,57 @@ class SessionCompressor:
         if self._source and self._is_append_only(history):
             tail = copy_chain(history[len(self._source):])
             candidate = self._emitted + tail
+            new_msgs = tail
         else:
             if self._source:  # edited past: previous emission is unusable
                 self._emitted = []
                 self.resets += 1
             candidate = copy_chain(history)
+            new_msgs = candidate
+        base_budget = budget
+        if self.guard is not None:
+            # a re-read of previously evicted content is the thrash signature:
+            # the guard pins it before this (or any later) checkpoint runs
+            self.guard.note_incoming(new_msgs)
+            budget = self.guard.effective_budget(base_budget)
 
         if self.counter.count_chain(candidate) > budget:
             if self.pre_checkpoint is not None:
                 candidate = self.pre_checkpoint(candidate)
-            target = max(1, int(budget * self.config.recompress_to))
-            result = None
-            if not self._target_impossible:
+            pre_checkpoint_msgs = candidate
+            while True:
                 try:
-                    result = compress(candidate, target, self.config, self.counter)
+                    result = self._compress_with_hysteresis(candidate, budget)
+                    break
                 except BudgetImpossible:
-                    self._target_impossible = True
-            if result is None:
-                # hysteresis target unreachable — the hard cap is what matters.
-                # Skip the doomed target ladder on subsequent checkpoints too,
-                # instead of paying two full escalation ladders every turn.
-                result = compress(candidate, budget, self.config, self.counter)
-                if result.compressed_tokens <= target:
-                    self._target_impossible = False  # target achievable again
+                    # pinning pressure can make a budget unreachable — with a
+                    # guard, grow the budget instead of failing the request
+                    if self.guard is not None and self.guard.force_escalate():
+                        budget = self.guard.effective_budget(base_budget)
+                        continue
+                    raise
             candidate = result.messages
             self.checkpoints += 1
+            if self.guard is not None:
+                self.guard.observe_checkpoint(pre_checkpoint_msgs, candidate)
 
         self._source = copy_chain(history)
         self._emitted = candidate
         return candidate
+
+    def _compress_with_hysteresis(self, candidate: list[Message], budget: int):
+        target = max(1, int(budget * self.config.recompress_to))
+        result = None
+        if not self._target_impossible:
+            try:
+                result = compress(candidate, target, self.config, self.counter)
+            except BudgetImpossible:
+                self._target_impossible = True
+        if result is None:
+            # hysteresis target unreachable — the hard cap is what matters.
+            # Skip the doomed target ladder on subsequent checkpoints too,
+            # instead of paying two full escalation ladders every turn.
+            result = compress(candidate, budget, self.config, self.counter)
+            if result.compressed_tokens <= target:
+                self._target_impossible = False  # target achievable again
+        return result

@@ -129,6 +129,7 @@ def truncate_tool_results(
     error_re: re.Pattern[str],
     salience: re.Pattern[str] | None = None,
     pin_re: re.Pattern[str] | None = None,
+    pin_check: Callable[[str], bool] | None = None,
 ) -> bool:
     """Stage 1: cut unprotected tool results down to excerpts. Errors keep more —
     they tend to get referenced later. Pinned messages are never touched."""
@@ -141,6 +142,8 @@ def truncate_tool_results(
         text = content_text(msgs[i])
         if pin_re is not None and pin_re.search(text):
             continue  # explicitly pinned: immune to truncation
+        if pin_check is not None and pin_check(text):
+            continue  # dynamically pinned (e.g. thrash-guard re-read)
         cap = error_max_chars if error_re.search(text) else max_chars
         new, did = truncate_text(text, cap, salience=salience)
         if did:
@@ -309,6 +312,7 @@ def evict_rounds(
     salience: re.Pattern[str] | None = None,
     max_salient: int = 3,
     pin_re: re.Pattern[str] | None = None,
+    pin_check: Callable[[str], bool] | None = None,
 ) -> tuple[list[Message], list[str], int]:
     """Stage 3: evict whole rounds oldest-first from ``msgs[start:end]`` until
     ``fits`` says the chain (plus its digest-in-progress) is under budget.
@@ -325,9 +329,12 @@ def evict_rounds(
         for m in msgs[s:e]:
             if is_opaque(m):
                 return True
-            if pin_re is not None and has_plain_text_content(m) and pin_re.search(
-                content_text(m)
-            ):
+            if not has_plain_text_content(m):
+                continue
+            text = content_text(m)
+            if pin_re is not None and pin_re.search(text):
+                return True
+            if pin_check is not None and pin_check(text):
                 return True
         return False
 

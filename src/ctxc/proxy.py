@@ -55,6 +55,7 @@ from .advisor import (
     strip_prune_calls,
 )
 from .compressor import BudgetImpossible, CompressConfig
+from .guard import ThrashGuard
 from .models import fingerprint
 from .redact import redact_messages
 from .session import SessionCompressor
@@ -111,6 +112,7 @@ def build_app(
     record_dir: str | Path | None = None,
     record_raw: bool = False,
     advisor: bool = False,
+    thrash_guard: bool = False,
 ) -> Starlette:
     if shadow and passthrough:
         raise ValueError("shadow and passthrough are mutually exclusive modes")
@@ -202,7 +204,8 @@ def build_app(
                 )
             entry = sessions[key] = (
                 SessionCompressor(budget, config=config, counter=counter,
-                                  pre_checkpoint=adv.hook if adv else None),
+                                  pre_checkpoint=adv.hook if adv else None,
+                                  guard=ThrashGuard() if thrash_guard else None),
                 asyncio.Lock(),
                 adv,
             )
@@ -365,14 +368,19 @@ def build_app(
         return JSONResponse({"ok": True, "sessions": len(sessions), "budget": budget})
 
     def _advisor_totals() -> dict:
-        if not advisor:
-            return {}
-        totals: dict[str, int] = {}
-        for _, _, adv in sessions.values():
-            if adv is None:
-                continue
-            for k, v in adv.stats().items():
-                totals[k] = totals.get(k, 0) + v
+        totals: dict[str, float] = {}
+        for sc, _, adv in sessions.values():
+            if adv is not None:
+                for k, v in adv.stats().items():
+                    totals[k] = totals.get(k, 0) + v
+            if sc.guard is not None:
+                g = sc.guard.stats()
+                totals["guard_pinned"] = totals.get("guard_pinned", 0) + g["guard_pinned"]
+                totals["guard_rereads"] = totals.get("guard_rereads", 0) + g["guard_rereads"]
+                totals["guard_forced_escalations"] = (
+                    totals.get("guard_forced_escalations", 0) + g["guard_forced_escalations"])
+                totals["guard_max_scale"] = max(
+                    totals.get("guard_max_scale", 1.0), g["guard_scale"])
         return totals
 
     async def stats_view(_: Request) -> Response:
@@ -396,9 +404,13 @@ def build_app(
         """Per-session (= per-task) attribution for A/B runs: scrape after each
         task, keyed by the x-ctxc-session-id you drove the task with."""
         merged = {k: dict(v) for k, v in session_stats.items()}
-        for key, (_, _, adv) in sessions.items():
-            if adv is not None and key in merged:
+        for key, (sc, _, adv) in sessions.items():
+            if key not in merged:
+                continue
+            if adv is not None:
                 merged[key].update(adv.stats())
+            if sc.guard is not None:
+                merged[key].update(sc.guard.stats())
         return JSONResponse({"mode": mode, "sessions": merged})
 
     @asynccontextmanager

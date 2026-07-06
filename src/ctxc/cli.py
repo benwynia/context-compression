@@ -135,6 +135,10 @@ def main(argv: list[str] | None = None) -> int:
                          "markers, offer the model a prune_context tool, apply "
                          "its directives at checkpoint boundaries (needs a "
                          "frontier-tier agent model; see RUNG10 results)")
+    pp.add_argument("--thrash-guard", action="store_true",
+                    help="circuit breaker for compression-induced churn: pin "
+                         "content the agent re-reads after eviction, and grow "
+                         "the budget on rapid checkpointing (see RUNG12)")
     _add_summarizer_flags(pp)
 
     pi = sub.add_parser("import", help="convert real transcripts (Claude Code "
@@ -320,7 +324,7 @@ def main(argv: list[str] | None = None) -> int:
         app = build_app(args.upstream, budget, config=_compress_config(args),
                         shadow=args.shadow, passthrough=args.passthrough,
                         record_dir=args.record, record_raw=args.record_raw,
-                        advisor=args.advisor)
+                        advisor=args.advisor, thrash_guard=args.thrash_guard)
         mode = ("PASSTHROUGH (control arm: no compression, measuring only)"
                 if args.passthrough
                 else "SHADOW (traffic untouched, measuring only)" if args.shadow
