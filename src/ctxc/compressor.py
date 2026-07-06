@@ -65,6 +65,9 @@ class CompressConfig:
     # message). Over-pinning can make a budget impossible; that failure is
     # loud, never silent.
     pin_pattern: str | None = r"ctxc:pin"
+    # dynamic pinning hook (content -> bool), OR'd with pin_pattern. Used by
+    # the thrash guard to protect content the agent re-read after eviction.
+    pin_check: Callable[[str], bool] | None = None
     # optional LLM summarizer hook: receives digest lines, returns the digest
     # body. Called at most once per compress(); output capped at the digest cap.
     summarizer: Callable[[list[str]], str] | None = None
@@ -221,7 +224,7 @@ def _attempt(
     if truncate_tool_results(
         msgs, body_start, tail_start,
         max_chars=level.trunc, error_max_chars=level.err_trunc, error_re=error_re,
-        salience=salience_re, pin_re=pin_re,
+        salience=salience_re, pin_re=pin_re, pin_check=cfg.pin_check,
     ):
         stages.append("truncate")
     digest_lines = list(prior_digest_lines)
@@ -240,6 +243,7 @@ def _attempt(
         fits=lambda work, lines: total(work, lines) <= budget,
         digest_lines=digest_lines,
         salience=salience_re, max_salient=cfg.digest_salient_lines, pin_re=pin_re,
+        pin_check=cfg.pin_check,
     )
     if evicted:
         stages.append("evict")
@@ -250,6 +254,7 @@ def _attempt(
             msgs, body_start, len(msgs),
             max_chars=level.tail_trunc, error_max_chars=level.tail_trunc,
             error_re=error_re, salience=salience_re, pin_re=pin_re,
+            pin_check=cfg.pin_check,
         ):
             stages.append("truncate-tail")
 

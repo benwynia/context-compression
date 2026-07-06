@@ -129,6 +129,58 @@ def test_claude_export_conversion(tmp_path):
     assert "conversation-1" in sessions
 
 
+def _copilot_oplog_lines():
+    node = {"node": {"children": [
+        {"type": 2, "text": "line one\n"},
+        {"children": [{"type": 2, "text": "line two"}]},
+    ]}}
+    snapshot = {"version": 3, "sessionId": "s1", "requests": []}
+    request = {
+        "requestId": "r1",
+        "message": {"text": "raw box text"},
+        "result": {"metadata": {
+            "renderedUserMessage": [
+                {"type": 1, "text": "rendered user turn"},
+                {"type": 3, "cacheType": "ephemeral"},
+            ],
+            "toolCallRounds": [
+                {"response": "", "toolCalls": [
+                    {"name": "read_file", "arguments": '{"filePath": "a.md"}',
+                     "id": "call_1__vscode-9"},
+                ]},
+                {"response": "All done.", "toolCalls": []},
+            ],
+            "toolCallResults": {
+                "call_1__vscode-9": {"$mid": 20, "content": [{"$mid": 23, "value": node}]},
+            },
+        }},
+    }
+    return [
+        {"kind": 0, "v": snapshot},
+        {"kind": 2, "k": ["requests"], "v": [request]},
+        {"kind": 1, "k": ["customTitle"], "v": "t"},
+    ]
+
+
+def test_vscode_copilot_jsonl_conversion(tmp_path):
+    from ctxc.ingest import vscode_copilot_jsonl
+
+    f = tmp_path / "copilot.jsonl"
+    f.write_text("\n".join(json.dumps(line) for line in _copilot_oplog_lines()))
+    msgs = vscode_copilot_jsonl(f)
+    assert validate_chain(msgs) == []
+    # renderedUserMessage wins over the raw chat-box text
+    assert msgs[0] == {"role": "user", "content": "rendered user turn"}
+    assert msgs[1]["role"] == "assistant"
+    assert msgs[1]["tool_calls"][0]["function"]["name"] == "read_file"
+    # tool result flattened from the prompt-tsx node tree, in order
+    assert msgs[2] == {"role": "tool", "tool_call_id": "call_1__vscode-9",
+                       "content": "line one\nline two"}
+    assert msgs[3] == {"role": "assistant", "content": "All done."}
+    # detect_and_convert routes op-logs by the "kind" discriminator
+    assert detect_and_convert(f)["copilot"] == msgs
+
+
 def test_detect_and_convert_roundtrip(tmp_path):
     f = tmp_path / "agent-y.jsonl"
     f.write_text("\n".join(json.dumps(line) for line in _claude_code_lines()))

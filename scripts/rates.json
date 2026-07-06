@@ -1,0 +1,16 @@
+{
+  "gpt-5.4-mini": {
+    "per_request": 0.0,
+    "per_1m_input": 75.0,
+    "per_1m_output": 450.0,
+    "per_1m_cache_read": 7.5,
+    "per_1m_cache_write": 75.0
+  },
+  "gpt-5.4": {
+    "per_request": 0.0,
+    "per_1m_input": 250.0,
+    "per_1m_output": 1500.0,
+    "per_1m_cache_read": 25.0,
+    "per_1m_cache_write": 250.0
+  }
+}

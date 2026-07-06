@@ -47,7 +47,15 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 
+from .advisor import (
+    AdvisorState,
+    inject_tool,
+    parse_sidecar_reply,
+    sidecar_request_body,
+    strip_prune_calls,
+)
 from .compressor import BudgetImpossible, CompressConfig
+from .guard import ThrashGuard
 from .models import fingerprint
 from .redact import redact_messages
 from .session import SessionCompressor
@@ -103,13 +111,20 @@ def build_app(
     passthrough: bool = False,
     record_dir: str | Path | None = None,
     record_raw: bool = False,
+    advisor: bool = False,
+    thrash_guard: bool = False,
 ) -> Starlette:
     if shadow and passthrough:
         raise ValueError("shadow and passthrough are mutually exclusive modes")
-    mode = "passthrough" if passthrough else ("shadow" if shadow else "active")
+    if advisor and (shadow or passthrough):
+        raise ValueError("advisor mode requires active compression")
+    mode = ("advisor" if advisor else
+            "passthrough" if passthrough else ("shadow" if shadow else "active"))
     upstream = upstream.rstrip("/")
     counter = counter or TokenCounter()
-    sessions: OrderedDict[str, tuple[SessionCompressor, asyncio.Lock]] = OrderedDict()
+    sessions: OrderedDict[
+        str, tuple[SessionCompressor, asyncio.Lock, "AdvisorState | None"]
+    ] = OrderedDict()
     owns_client = client is None
     http = client or httpx.AsyncClient(timeout=120.0)
     rec_dir = Path(record_dir) if record_dir else None
@@ -161,6 +176,13 @@ def build_app(
         if not isinstance(messages, list):
             return JSONResponse({"error": "missing messages"}, status_code=400)
 
+        # Advisor: the prune tool rides along only when the agent already
+        # speaks tools and isn't streaming (stripping SSE mid-flight is not
+        # worth the machinery — a skipped turn just defers advice).
+        advising = advisor and not body.get("stream") and bool(body.get("tools"))
+        if advising:
+            inject_tool(body)
+
         # tools schemas share the context window with the messages: they count
         # against the same budget, or a "60k budget" would overshoot the cap.
         tools_tokens = tools_token_count(counter, body["tools"]) if body.get("tools") else 0
@@ -174,16 +196,25 @@ def build_app(
         key = _session_key(request, messages)
         entry = sessions.get(key)
         if entry is None:
+            adv = None
+            if advisor:
+                adv = AdvisorState(
+                    keep_recent=(config or CompressConfig()).keep_recent,
+                    counter=counter,
+                )
             entry = sessions[key] = (
-                SessionCompressor(budget, config=config, counter=counter),
+                SessionCompressor(budget, config=config, counter=counter,
+                                  pre_checkpoint=adv.hook if adv else None,
+                                  guard=ThrashGuard() if thrash_guard else None),
                 asyncio.Lock(),
+                adv,
             )
             session_stats[key] = _fresh_session_stats()
             while len(sessions) > max_sessions:  # LRU: drop the stalest session
                 dropped, _ = sessions.popitem(last=False)
                 session_stats.pop(dropped, None)
         sessions.move_to_end(key)
-        sc, lock = entry
+        sc, lock, adv = entry
         per = session_stats[key]
         redactions = _record(key, messages)
         stats["redactions"] += redactions
@@ -200,11 +231,17 @@ def build_app(
                 # it off the event loop so one big checkpoint doesn't stall every
                 # other in-flight session; the per-session lock keeps sc state
                 # sequential.
+                # advisor: compression sees the marker-annotated history (a
+                # pure, deterministic function of the client's, so append-only
+                # stays append-only); baseline accounting still counts the raw
+                # client chain.
+                compress_input = (messages if adv is None
+                                  else adv.annotate_input(messages, max(1, effective_budget)))
                 async with lock:
                     original_tokens, emitted = await asyncio.to_thread(
                         lambda: (
                             counter.count_chain(messages),
-                            sc.request(messages, budget=max(1, effective_budget)),
+                            sc.request(compress_input, budget=max(1, effective_budget)),
                         )
                     )
             except BudgetImpossible as e:
@@ -225,7 +262,9 @@ def build_app(
         per["compress_ms_max"] = max(per["compress_ms_max"], compress_ms)
 
         emitted_tokens = counter.count_chain(emitted) if emitted is not None else None
-        if mode == "active" and emitted is not None:
+        if adv is not None and emitted_tokens is not None:
+            adv.last_emitted_tokens = emitted_tokens  # pressure signal for reminders
+        if mode in ("active", "advisor") and emitted is not None:
             body["messages"] = emitted
 
         fwd_headers = {
@@ -285,13 +324,64 @@ def build_app(
 
         resp = await http.post(url, json=body, headers=fwd_headers)
         _account(_usage_from(resp.content))
+        content = resp.content
+        if advising and adv is not None and resp.status_code == 200:
+            # harvest prune directives; the agent never sees the tool call
+            content, directives, prune_only = strip_prune_calls(content)
+            if directives:
+                adv.add_directives(directives, history_len=len(messages))
+            if prune_only:
+                adv.prune_only_responses += 1
+        if (adv is not None and emitted is not None and resp.status_code == 200
+                and adv.wants_sidecar(max(1, effective_budget))):
+            # write-behind advisory query: fire-and-forget, never on the
+            # request path; directives land in the ledger for the next
+            # checkpoint. Any failure is silently just "no advice".
+            adv.sidecar_inflight = True
+            history_len = len(messages)
+
+            async def _sidecar(emission=emitted, n=history_len,
+                               auth=request.headers.get("authorization", ""),
+                               model=body.get("model", "")):
+                try:
+                    sc_body = sidecar_request_body(emission, model)
+                    hdrs = {"authorization": auth} if auth else {}
+                    r = await http.post(f"{upstream}/v1/chat/completions"
+                                        if not upstream.endswith("/v1")
+                                        else f"{upstream}/chat/completions",
+                                        json=sc_body, headers=hdrs)
+                    if r.status_code == 200:
+                        adv.add_directives(parse_sidecar_reply(r.content), history_len=n)
+                        adv.sidecar_calls += 1
+                except httpx.HTTPError:
+                    pass
+                finally:
+                    adv.sidecar_inflight = False
+
+            asyncio.create_task(_sidecar())
         return Response(
-            content=resp.content, status_code=resp.status_code,
+            content=content, status_code=resp.status_code,
             headers=_out_headers(resp.headers),
         )
 
     async def health(_: Request) -> Response:
         return JSONResponse({"ok": True, "sessions": len(sessions), "budget": budget})
+
+    def _advisor_totals() -> dict:
+        totals: dict[str, float] = {}
+        for sc, _, adv in sessions.values():
+            if adv is not None:
+                for k, v in adv.stats().items():
+                    totals[k] = totals.get(k, 0) + v
+            if sc.guard is not None:
+                g = sc.guard.stats()
+                totals["guard_pinned"] = totals.get("guard_pinned", 0) + g["guard_pinned"]
+                totals["guard_rereads"] = totals.get("guard_rereads", 0) + g["guard_rereads"]
+                totals["guard_forced_escalations"] = (
+                    totals.get("guard_forced_escalations", 0) + g["guard_forced_escalations"])
+                totals["guard_max_scale"] = max(
+                    totals.get("guard_max_scale", 1.0), g["guard_scale"])
+        return totals
 
     async def stats_view(_: Request) -> Response:
         o, e = stats["original_tokens"], stats["emitted_tokens"]
@@ -300,6 +390,7 @@ def build_app(
                 "mode": mode,
                 "sessions": len(sessions),
                 **stats,
+                **_advisor_totals(),
                 "saved_tokens": o - e,
                 "saved_pct": round(100.0 * (o - e) / o, 2) if o else 0.0,
                 # in shadow/passthrough the upstream sees the ORIGINAL chain, so
@@ -312,7 +403,15 @@ def build_app(
     async def session_stats_view(_: Request) -> Response:
         """Per-session (= per-task) attribution for A/B runs: scrape after each
         task, keyed by the x-ctxc-session-id you drove the task with."""
-        return JSONResponse({"mode": mode, "sessions": session_stats})
+        merged = {k: dict(v) for k, v in session_stats.items()}
+        for key, (sc, _, adv) in sessions.items():
+            if key not in merged:
+                continue
+            if adv is not None:
+                merged[key].update(adv.stats())
+            if sc.guard is not None:
+                merged[key].update(sc.guard.stats())
+        return JSONResponse({"mode": mode, "sessions": merged})
 
     @asynccontextmanager
     async def lifespan(_: Starlette):
