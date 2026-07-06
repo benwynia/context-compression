@@ -1,0 +1,694 @@
+<title>Smaller Conversations, Same Answers — context compression, explained</title>
+<style>
+  :root {
+    --paper: #F3F5F2;
+    --panel: #FBFCFB;
+    --ink: #22302C;
+    --muted: #5C6B65;
+    --line: #D9DFDA;
+    --accent: #0E7C63;
+    --accent-soft: #E1EFEA;
+    --warn: #B7791F;
+    --warn-soft: #F5EAD5;
+    --danger: #B03A2E;
+    --danger-soft: #F3E0DD;
+    --pin: #5B4B8A;
+    --pin-soft: #E9E5F2;
+    --shadow: 0 1px 2px rgba(34, 48, 44, .06), 0 6px 18px rgba(34, 48, 44, .05);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #151B19;
+      --panel: #1D2522;
+      --ink: #DEE7E2;
+      --muted: #8FA098;
+      --line: #2C3833;
+      --accent: #4CC2A4;
+      --accent-soft: #17352E;
+      --warn: #D9A03F;
+      --warn-soft: #35290F;
+      --danger: #D96A5B;
+      --danger-soft: #3A1F1A;
+      --pin: #A794D6;
+      --pin-soft: #2A2438;
+      --shadow: 0 1px 2px rgba(0,0,0,.3), 0 6px 18px rgba(0,0,0,.25);
+    }
+  }
+  :root[data-theme="light"] {
+    --paper: #F3F5F2; --panel: #FBFCFB; --ink: #22302C; --muted: #5C6B65;
+    --line: #D9DFDA; --accent: #0E7C63; --accent-soft: #E1EFEA;
+    --warn: #B7791F; --warn-soft: #F5EAD5; --danger: #B03A2E; --danger-soft: #F3E0DD;
+    --pin: #5B4B8A; --pin-soft: #E9E5F2;
+    --shadow: 0 1px 2px rgba(34,48,44,.06), 0 6px 18px rgba(34,48,44,.05);
+  }
+  :root[data-theme="dark"] {
+    --paper: #151B19; --panel: #1D2522; --ink: #DEE7E2; --muted: #8FA098;
+    --line: #2C3833; --accent: #4CC2A4; --accent-soft: #17352E;
+    --warn: #D9A03F; --warn-soft: #35290F; --danger: #D96A5B; --danger-soft: #3A1F1A;
+    --pin: #A794D6; --pin-soft: #2A2438;
+    --shadow: 0 1px 2px rgba(0,0,0,.3), 0 6px 18px rgba(0,0,0,.25);
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Palatino, "Palatino Linotype", "Book Antiqua", Georgia, serif;
+    font-size: 17px;
+    line-height: 1.6;
+  }
+  .mono {
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+  }
+
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 0 24px; }
+
+  header.top { padding: 56px 0 8px; }
+  .kicker {
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 11px; letter-spacing: .16em; text-transform: uppercase;
+    color: var(--accent); margin: 0 0 14px;
+  }
+  h1 {
+    font-size: clamp(30px, 4.6vw, 46px);
+    line-height: 1.12; margin: 0 0 12px; font-weight: 700;
+    text-wrap: balance; max-width: 21ch;
+  }
+  .lede { color: var(--muted); max-width: 58ch; margin: 0 0 8px; }
+
+  /* ---------------- player ---------------- */
+  .player {
+    margin: 36px 0 22px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    box-shadow: var(--shadow);
+    overflow: hidden;
+  }
+  .player-grid {
+    display: grid;
+    grid-template-columns: minmax(300px, 400px) 1fr;
+  }
+  @media (max-width: 820px) { .player-grid { grid-template-columns: 1fr; } }
+
+  .narrative { padding: 34px 32px 26px; border-right: 1px solid var(--line); display: flex; flex-direction: column; }
+  @media (max-width: 820px) { .narrative { border-right: none; border-bottom: 1px solid var(--line); } }
+  .scene-no {
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 11px; letter-spacing: .14em; text-transform: uppercase;
+    color: var(--muted); margin: 0 0 10px;
+  }
+  .scene-no b { color: var(--accent); font-weight: 600; }
+  .phase {
+    display: inline-block; margin-bottom: 8px;
+    padding: 3px 9px; border-radius: 4px;
+    font-size: 10px; letter-spacing: .13em;
+  }
+  .phase.today { background: var(--danger-soft); color: var(--danger); }
+  .phase.ours { background: var(--accent-soft); color: var(--accent); }
+  .phase.proof { background: var(--line); color: var(--ink); }
+  h2.scene-title { font-size: 24px; line-height: 1.2; margin: 0 0 12px; text-wrap: balance; }
+  .scene-body { margin: 0; color: var(--ink); }
+  .scene-body .hl { color: var(--accent); font-style: italic; }
+
+  .controls { margin-top: auto; padding-top: 26px; display: flex; align-items: center; gap: 14px; }
+  .btn {
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 12px; letter-spacing: .1em; text-transform: uppercase;
+    background: var(--ink); color: var(--paper);
+    border: none; border-radius: 6px; padding: 10px 16px; cursor: pointer;
+  }
+  .btn.secondary { background: transparent; color: var(--ink); border: 1px solid var(--line); }
+  .btn:focus-visible, .dot:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .btn[disabled] { opacity: .35; cursor: default; }
+  .dots { display: flex; gap: 7px; margin-left: auto; }
+  .dot {
+    width: 9px; height: 9px; border-radius: 50%;
+    background: var(--line); border: none; padding: 0; cursor: pointer;
+  }
+  .dot[aria-current="true"] { background: var(--accent); }
+
+  /* ---------------- stage ---------------- */
+  .stage {
+    position: relative;
+    min-height: 584px;
+    padding: 26px 30px 88px;
+    background:
+      repeating-linear-gradient(to bottom, transparent 0 27px, color-mix(in srgb, var(--line) 42%, transparent) 27px 28px);
+  }
+  .layer {
+    position: absolute; inset: 26px 30px 88px;
+    opacity: 0; visibility: hidden; transition: opacity .45s ease;
+    overflow: hidden;
+  }
+  .layer.on { opacity: 1; visibility: visible; }
+
+  /* conversation stack */
+  .stack { display: flex; flex-direction: column; gap: 8px; max-width: 430px; margin: 0 auto; position: relative; }
+  .budget-line {
+    position: absolute; left: -14px; right: -14px; top: 352px;
+    border-top: 2px dashed var(--danger);
+    opacity: 0; transition: opacity .5s ease;
+    pointer-events: none;
+  }
+  .budget-line .tag {
+    position: absolute; right: 0; top: 5px;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 10px; letter-spacing: .12em; text-transform: uppercase;
+    color: var(--danger);
+    background: var(--paper); padding: 0 4px;
+  }
+  .blk {
+    border: 1px solid var(--line);
+    background: var(--panel);
+    border-radius: 6px;
+    padding: 7px 11px;
+    font-size: 13px;
+    line-height: 1.3;
+    display: flex; align-items: center; gap: 10px;
+    max-height: 56px;
+    transition: max-height .55s ease, opacity .55s ease, padding .55s ease,
+                border-color .55s ease, background-color .55s ease, transform .55s ease;
+    overflow: hidden;
+    position: relative;
+  }
+  .blk .chip {
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 9.5px; letter-spacing: .1em; text-transform: uppercase;
+    padding: 2px 7px; border-radius: 4px; white-space: nowrap;
+    background: var(--line); color: var(--muted); flex-shrink: 0;
+  }
+  .blk.head { border-color: var(--pin); background: var(--pin-soft); }
+  .blk.head .chip { background: var(--pin); color: var(--paper); }
+  .blk.recent .chip { background: var(--ink); color: var(--paper); }
+  .blk .body-txt { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  .stamp {
+    position: absolute; right: 10px; top: 50%; transform: translateY(-50%) rotate(-6deg) scale(1.4);
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 10px; letter-spacing: .14em; text-transform: uppercase;
+    color: var(--pin); border: 1.5px solid var(--pin); border-radius: 4px;
+    padding: 1px 6px; opacity: 0; transition: opacity .4s ease .35s, transform .4s ease .35s;
+  }
+  .stage[data-s="4"] .stamp, .stage[data-s="8"] .stamp { opacity: 1; transform: translateY(-50%) rotate(-6deg) scale(1); }
+
+  /* cached wash */
+  .blk.cached::after {
+    content: "seen before · 90% off";
+    position: absolute; right: 10px;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 9px; letter-spacing: .1em; text-transform: uppercase;
+    color: var(--accent);
+  }
+  .blk.cached { border-color: var(--accent); background: var(--accent-soft); }
+
+  /* digest + collapse + tombstones */
+  .digest {
+    border: 1px solid var(--accent); background: var(--accent-soft);
+    border-radius: 6px; padding: 0 12px; font-size: 13px; color: var(--ink);
+    max-height: 0; opacity: 0; overflow: hidden;
+    transition: max-height .6s ease, opacity .6s ease, padding .6s ease;
+  }
+  .digest .chip-row { display: flex; gap: 8px; align-items: center; padding-top: 9px; }
+  .digest p { margin: 4px 0 9px; color: var(--muted); font-size: 12.5px; }
+  .stage.show-digest .digest { max-height: 90px; opacity: 1; }
+  .blk.gone { max-height: 0; opacity: 0; padding-top: 0; padding-bottom: 0; border-width: 0; }
+  .blk.trim .body-txt::after { content: " · trimmed to excerpt"; color: var(--warn); font-size: 11px; }
+  .blk.tomb { border-style: dashed; background: transparent; color: var(--muted); }
+  .blk.tomb .chip { background: transparent; border: 1px dashed var(--muted); }
+  .blk.tomb .body-txt { font-style: italic; }
+
+  /* ghost send (scene 1) */
+  .ghost {
+    position: absolute; inset: 0 auto auto 0; width: 100%;
+    border: 1.5px dashed var(--warn); border-radius: 8px; height: 100%;
+    opacity: 0; pointer-events: none;
+  }
+  .stage[data-s="1"] .ghost { animation: fly 2.4s ease-in infinite; }
+  @keyframes fly {
+    0%   { opacity: 0; transform: translate(0, 0) scale(1); }
+    18%  { opacity: .8; }
+    70%  { opacity: .25; }
+    100% { opacity: 0; transform: translate(120px, -26px) scale(.82); }
+  }
+
+  /* cost meter */
+  .meter-wrap {
+    position: absolute; left: 30px; right: 30px; bottom: 24px;
+    transition: opacity .4s ease;
+  }
+  .meter-cap {
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 10.5px; letter-spacing: .12em; text-transform: uppercase;
+    color: var(--muted); margin-bottom: 6px; display: block;
+  }
+  .meter { height: 10px; border-radius: 5px; background: var(--line); overflow: hidden; }
+  .meter .fill {
+    height: 100%; width: 30%;
+    background: var(--accent);
+    border-radius: 5px;
+    transition: width .8s ease, background-color .8s ease;
+  }
+  .stage[data-s="4"] .meter .fill { animation: spike 1.6s ease 1; }
+  @keyframes spike { 0% { width: 20%; } 35% { width: 92%; } 100% { width: 34%; } }
+
+  /* scene 5: two dials */
+  .dials { display: grid; grid-template-columns: 1fr 1fr; gap: 22px; max-width: 470px; margin: 30px auto 0; }
+  .dials[hidden] { display: none; }
+
+  .panic {
+    max-width: 430px; margin: 30px auto 0;
+    border: 1.5px dashed var(--danger); background: var(--danger-soft);
+    border-radius: 8px; padding: 10px 13px;
+    font-size: 12.5px; line-height: 1.45; color: var(--ink);
+    display: flex; gap: 10px; align-items: flex-start;
+  }
+  .panic[hidden] { display: none; }
+  .panic .chip {
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 9.5px; letter-spacing: .1em; text-transform: uppercase;
+    padding: 2px 7px; border-radius: 4px; white-space: nowrap; flex-shrink: 0;
+    margin-top: 2px;
+  }
+  .dial-card { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); padding: 16px; }
+  .dial-card h4 { margin: 0 0 4px; font-size: 15px; }
+  .dial-card .sub { font-size: 12px; color: var(--muted); margin: 0 0 12px; }
+  .ticks { display: flex; gap: 4px; height: 34px; align-items: flex-end; margin-bottom: 10px; }
+  .tick { flex: 1; background: var(--accent-soft); border-radius: 2px; height: 40%; }
+  .tick.miss { background: var(--danger); height: 100%; }
+  .dial-note { font-size: 12px; color: var(--muted); line-height: 1.45; margin: 0; }
+  .dial-note b { color: var(--ink); }
+
+  /* flow diagram (scenes 6-7) */
+  .flow { max-width: 520px; margin: 44px auto 0; position: relative; }
+  .flow-row { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+  .node {
+    border: 1px solid var(--line); background: var(--panel); border-radius: 8px;
+    padding: 14px 16px; text-align: center; width: 31%;
+    box-shadow: var(--shadow);
+  }
+  .node .nm { font-weight: 700; font-size: 14.5px; display: block; }
+  .node .role { font-size: 11.5px; color: var(--muted); }
+  .node.relay { border-color: var(--accent); }
+  .pipe { position: absolute; top: 50%; left: 31%; width: 38%; border-top: 1.5px solid var(--line); z-index: -1; display: none; }
+  .msg-dot {
+    position: absolute; top: 34px; left: 8%;
+    width: 34px; height: 12px; border-radius: 6px; background: var(--warn);
+    animation: travel 3s ease-in-out infinite;
+  }
+  @keyframes travel {
+    0%   { left: 6%;  width: 40px; background: var(--warn); }
+    42%  { left: 44%; width: 40px; background: var(--warn); }
+    58%  { left: 47%; width: 16px; background: var(--accent); }
+    100% { left: 88%; width: 16px; background: var(--accent); }
+  }
+  .flow-caption { text-align: center; font-size: 12.5px; color: var(--muted); margin-top: 60px; }
+  .flow-caption b { color: var(--ink); }
+
+  .sidecar { margin: 26px auto 0; max-width: 520px; opacity: 0; transition: opacity .5s ease .2s; }
+  .stage[data-s="7"] .sidecar { opacity: 1; }
+  .sc-bubble {
+    border: 1.5px dashed var(--accent); border-radius: 8px; padding: 12px 14px;
+    font-size: 13px; background: var(--accent-soft);
+  }
+  .sc-bubble .q { margin: 0 0 8px; }
+  .sc-reply { display: flex; gap: 6px; flex-wrap: wrap; }
+  .sc-reply .chip {
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 10px; letter-spacing: .08em;
+    border: 1px solid var(--accent); color: var(--accent);
+    border-radius: 4px; padding: 2px 7px; background: var(--panel);
+  }
+
+  /* scene 9: results */
+  .results { max-width: 460px; margin: 8px auto 0; }
+  .results table { width: 100%; border-collapse: collapse; font-size: 14px; font-variant-numeric: tabular-nums; }
+  .results th, .results td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--line); }
+  .results th {
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 10px; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); font-weight: 500;
+  }
+  .results td.good { color: var(--accent); font-weight: 700; }
+  .results .cav { font-size: 12.5px; color: var(--muted); margin-top: 14px; line-height: 1.5; }
+
+  /* cast legend */
+  .cast {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px;
+    margin: 22px 0 8px;
+    border: 1px solid var(--line); border-radius: 8px;
+    background: var(--panel); padding: 18px 20px;
+  }
+  @media (max-width: 820px) { .cast { grid-template-columns: 1fr; } }
+  .cast-name {
+    font-size: 11px; color: var(--accent); display: block; margin-bottom: 6px;
+  }
+  .cast-item p { margin: 0; font-size: 13px; color: var(--muted); line-height: 1.5; }
+
+  /* why-this-works section */
+  .why { margin: 54px 0 10px; }
+  .why .kicker { margin-bottom: 10px; }
+  .why-title { font-size: clamp(24px, 3.2vw, 32px); line-height: 1.15; margin: 0 0 10px; text-wrap: balance; }
+  .why-lede { color: var(--muted); max-width: 62ch; margin: 0 0 22px; }
+  .why-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 820px) { .why-grid { grid-template-columns: 1fr; } }
+
+  /* below-player summary strip */
+  .tradeoffs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin: 26px 0 56px; }
+  @media (max-width: 820px) { .tradeoffs { grid-template-columns: 1fr; } }
+  .to-card { border: 1px solid var(--line); border-radius: 8px; padding: 18px 18px 14px; background: var(--panel); }
+  .to-card h3 { margin: 0 0 6px; font-size: 16px; }
+  .to-card p { margin: 0; font-size: 13.5px; color: var(--muted); line-height: 1.5; }
+  .to-card .tag {
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 9.5px; letter-spacing: .12em; text-transform: uppercase;
+    color: var(--accent); display: block; margin-bottom: 8px;
+  }
+
+  footer { border-top: 1px solid var(--line); padding: 20px 0 48px; color: var(--muted); font-size: 12.5px; }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation: none !important; transition-duration: .01s !important; }
+  }
+</style>
+
+<div class="wrap">
+  <header class="top">
+    <p class="kicker">Context compression, explained in ten steps</p>
+    <h1>Smaller conversations, same answers</h1>
+    <p class="lede">AI coding assistants re-send their whole conversation with every message — and you pay for every word, every time. This is how we shrink that bill without making the assistant worse at its job. Step through the story below.</p>
+  </header>
+
+  <section class="player" aria-label="Animated explainer">
+    <div class="player-grid">
+      <div class="narrative">
+        <p class="scene-no"><span class="phase" id="sc-phase">How it works today</span><br><b id="sc-num">Step 1</b> <span id="sc-of">of 10</span></p>
+        <h2 class="scene-title" id="sc-title"></h2>
+        <p class="scene-body" id="sc-body"></p>
+        <div class="controls">
+          <button class="btn secondary" id="prev" aria-label="Previous step">‹ Back</button>
+          <button class="btn" id="next" aria-label="Next step">Next ›</button>
+          <div class="dots" id="dots" role="tablist" aria-label="Steps"></div>
+        </div>
+      </div>
+
+      <div class="stage" id="stage" data-s="1">
+        <!-- layer 1: the conversation stack -->
+        <div class="layer on" id="layer-stack">
+          <div class="stack" id="stack">
+            <div class="budget-line" id="budget"><span class="tag">size limit</span></div>
+            <div class="ghost" id="ghost"></div>
+            <div class="blk head" id="b-head"><span class="chip">instructions</span><span class="body-txt">The task &amp; ground rules — never altered</span><span class="stamp">kept</span></div>
+            <div class="blk old" id="b1"><span class="chip">file read</span><span class="body-txt">auth.py — 240 lines</span></div>
+            <div class="blk old" id="b2"><span class="chip">test output</span><span class="body-txt">42 tests, 3 failed</span></div>
+            <div class="blk old" id="b3"><span class="chip">file read</span><span class="body-txt">utils.py — 180 lines</span></div>
+            <div class="digest" id="digest">
+              <div class="chip-row"><span class="chip" style="background:var(--accent);color:var(--paper)">minutes</span><b style="font-size:12.5px">One-paragraph summary of everything removed</b></div>
+              <p>Read auth.py &amp; utils.py; 3 failing tests found in checkout flow; fix attempt #1 didn't hold.</p>
+            </div>
+            <div class="blk old" id="b4"><span class="chip">cmd output</span><span class="body-txt">grep results — 60 matches</span></div>
+            <div class="blk old" id="b5"><span class="chip">file read</span><span class="body-txt">config.py — 95 lines</span></div>
+            <div class="blk recent" id="b6"><span class="chip">assistant</span><span class="body-txt">Editing the fix in checkout.py…</span></div>
+            <div class="blk recent" id="b7"><span class="chip">latest</span><span class="body-txt">Test rerun — all green</span></div>
+          </div>
+
+          <div class="panic" id="panic" hidden>
+            <span class="chip" style="background:var(--danger);color:var(--paper)">at the cliff</span>
+            <span>The tool asks the AI to summarize the <b>entire conversation</b> — slow, full price, and a paraphrase that can misremember details.</span>
+          </div>
+
+          <div class="dials" id="dials" hidden>
+            <div class="dial-card">
+              <h4>Small budget</h4>
+              <p class="sub">tight limit, frequent cleanups</p>
+              <div class="ticks" aria-hidden="true">
+                <span class="tick"></span><span class="tick miss"></span><span class="tick"></span><span class="tick miss"></span><span class="tick"></span><span class="tick miss"></span><span class="tick"></span><span class="tick miss"></span>
+              </div>
+              <p class="dial-note"><b>Short messages, but</b> each red bar is a cleanup: a full-price turn and a fresh chance of trimming something needed.</p>
+            </div>
+            <div class="dial-card">
+              <h4>Large budget</h4>
+              <p class="sub">loose limit, rare cleanups</p>
+              <div class="ticks" aria-hidden="true">
+                <span class="tick"></span><span class="tick"></span><span class="tick"></span><span class="tick"></span><span class="tick"></span><span class="tick miss"></span><span class="tick"></span><span class="tick"></span>
+              </div>
+              <p class="dial-note"><b>Safer and cache-friendly, but</b> every message hauls more dead weight, and the discount only softens that — it doesn't erase it.</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- layer 2: relay flow -->
+        <div class="layer" id="layer-flow">
+          <div class="flow">
+            <div class="flow-row">
+              <div class="node"><span class="nm">Engineer</span><span class="role">VS Code + assistant</span></div>
+              <div class="node relay"><span class="nm">Relay</span><span class="role">slims each request</span></div>
+              <div class="node"><span class="nm">AI provider</span><span class="role">answers as usual</span></div>
+            </div>
+            <div class="msg-dot" aria-hidden="true"></div>
+            <p class="flow-caption"><b>The orange bar is a request.</b> It leaves the editor full-size, gets slimmed at the relay, and arrives small. The answer comes back untouched. The engineer never notices.</p>
+          </div>
+          <div class="sidecar">
+            <div class="sc-bubble">
+              <p class="q"><b>The advisor's question (relay → AI, in the background):</b> “Here's the conversation with each old block labeled. Which are you finished with?”</p>
+              <div class="sc-reply">
+                <span class="chip">remove t3 · superseded read</span>
+                <span class="chip">remove t9 · error fixed</span>
+                <span class="chip">remove t12 · dead end</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- layer 3: results -->
+        <div class="layer" id="layer-results">
+          <div class="results">
+            <table>
+              <thead><tr><th>50 real bugs, judged by the official test suite</th><th>with</th><th>without</th></tr></thead>
+              <tbody>
+                <tr><td>Bugs actually fixed</td><td class="good">14</td><td>13</td></tr>
+                <tr><td>Words sent to the AI</td><td class="good">−80%</td><td>—</td></tr>
+                <tr><td>Real dollars (all discounts counted)</td><td class="good">−27%</td><td>—</td></tr>
+                <tr><td>Compression failures</td><td class="good">0</td><td>—</td></tr>
+              </tbody>
+            </table>
+            <p class="cav">Honest caveat: benchmark sessions are shorter than a real workday. Longer sessions should benefit <i>more</i> — but proving that on live traffic is the next experiment, not a promise.</p>
+          </div>
+        </div>
+
+        <div class="meter-wrap" id="meterwrap">
+          <span class="meter-cap" id="meter-cap">Each message costs more than the last</span>
+          <div class="meter"><div class="fill" id="meter-fill"></div></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="cast" aria-label="The three parts of the system">
+    <div class="cast-item">
+      <span class="cast-name mono">The relay</span>
+      <p>The small service every request passes through on its way to the AI. The whole system lives inside it; the engineer never sees it.</p>
+    </div>
+    <div class="cast-item">
+      <span class="cast-name mono">The janitor</span>
+      <p>The relay's rule-following cleanup crew. At each checkpoint it trims, files the "minutes," leaves tombstones — by fixed rules, never by rewriting.</p>
+    </div>
+    <div class="cast-item">
+      <span class="cast-name mono">The advisor</span>
+      <p>The relay's background question to the same AI: "which blocks are you finished with?" Judgment for the janitor to execute.</p>
+    </div>
+  </section>
+
+  <section class="why" aria-label="Why this works">
+    <p class="kicker">Why this works</p>
+    <h2 class="why-title">Deleting words is not deleting knowledge</h2>
+    <p class="why-lede">Cutting 80% of a conversation sounds reckless — until you look at what the words actually are. A coding session is a thin thread of decisions wrapped in a huge amount of scaffolding, and the method is built to keep the thread and shed the wrap.</p>
+    <div class="why-grid">
+      <div class="to-card">
+        <span class="tag">1 · The signal is thin</span>
+        <h3>Most words did their job already</h3>
+        <p>A 240-line file dump was needed for the ten seconds it took to find one function. The log of an error that's since been fixed is pure history. What actually steers the assistant — the task, the decisions, what was tried, where things stand — is a small fraction of the transcript, and that's the part we never touch.</p>
+      </div>
+      <div class="to-card">
+        <span class="tag">2 · Verbatim or visible</span>
+        <h3>Nothing is ever retold from memory</h3>
+        <p>Everything kept is kept word-for-word — instructions, recent work, and important-looking lines (error messages, version numbers, decisions) that survive trimming on purpose. Everything removed says so, in place. Since nothing is paraphrased, nothing can be misremembered. That's the failure that kills summarize-it-with-AI approaches, and it's designed out.</p>
+      </div>
+      <div class="to-card">
+        <span class="tag">3 · The repo is the real memory</span>
+        <h3>The conversation is a window, not the warehouse</h3>
+        <p>The code lives on disk. Test results can be regenerated in seconds. The transcript is just a working view of things that still exist — so removing a stale file-read costs, at worst, one cheap re-read. We're not burning the library; we're returning books it already finished.</p>
+      </div>
+      <div class="to-card">
+        <span class="tag">4 · Meaning decides, not age</span>
+        <h3>The author flags what's disposable</h3>
+        <p>Rules alone judge by age and size — crude. The advisor asks the one party that understands the task, the AI itself, to name the blocks it's finished with; the janitor executes exactly that list and nothing more. Judgment chooses, rules enforce — each doing the job the other can't.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="tradeoffs" aria-label="The three trade-offs">
+    <div class="to-card">
+      <span class="tag">Trade-off 1 · size vs. frequency</span>
+      <h3>The budget is a dial</h3>
+      <p>Tighter budgets mean shorter (cheaper) messages but more cleanups — and every cleanup is one full-price turn plus a fresh chance to trim something needed.</p>
+    </div>
+    <div class="to-card">
+      <span class="tag">Trade-off 2 · rules vs. judgment</span>
+      <h3>Rules can't read minds</h3>
+      <p>Fixed rules never misquote anything, but they judge by age and size, not meaning. Asking the AI itself what's disposable adds judgment — at the price of trusting it.</p>
+    </div>
+    <div class="to-card">
+      <span class="tag">Trade-off 3 · deleting vs. tombstoning</span>
+      <h3>Nothing vanishes silently</h3>
+      <p>Removed blocks leave a one-line marker saying what was removed and why, and the original stays in the relay's archive. A wrong removal costs a re-read, not a disaster.</p>
+    </div>
+  </section>
+
+  <footer>
+    <div class="wrap" style="padding:0">
+      Built from the context-compression project. Every number shown comes from a graded, pre-registered experiment; nothing is projected. Use ← → keys to step.
+    </div>
+  </footer>
+</div>
+
+<script>
+  const SCENES = [
+    {
+      title: "Today: chat until the tank is full",
+      body: "An engineer picks a model, opens a chat, and works. The conversation window slowly fills — and nothing in the tool rewards tidying up early. At the hard limit, the tool rescues itself: it sends the entire transcript back to the AI and asks for a shorter rewrite. One slow, full-price pass at the worst possible moment — and a paraphrase, so details can quietly change in the retelling. That panic move is the status quo we're replacing.",
+      s: 0, meter: { cap: "Every turn re-pays for the whole story — priciest right before the cliff", w: "88%", c: "var(--danger)" }
+    },
+    {
+      title: "You pay for yesterday's conversation, again",
+      body: "The AI doesn't remember anything between messages. So every time the assistant answers, your tool silently re-sends the entire conversation — every question, every file it opened. Watch the dashed copy fly out: that's the whole stack, sent again, every single turn. The longer the session, the bigger every message.",
+      s: 1, meter: { cap: "Each message costs more than the last", w: "72%", c: "var(--warn)" }
+    },
+    {
+      title: "The discount for repeats",
+      body: "Providers charge about one-tenth price for any part of the conversation they've already seen — but only if it's identical, starting from the very top. That's why the green wash spreads from the top down. Change anything in the middle, and everything below it goes back to full price.",
+      s: 2, meter: { cap: "Repeats ride a ~90% discount", w: "26%", c: "var(--accent)" }
+    },
+    {
+      title: "Our method starts here: draw the line early",
+      body: "Everything before this step is how the tools behave today. Our change begins with one decision: pick a size limit far below the model's hard cap, and manage to it deliberately — many small, planned cleanups instead of one panic at the cliff. As long as the stack stays under our line, each turn just adds a little to the end, and nearly everything rides the discount.",
+      s: 3, meter: { cap: "Cheap little additions each turn", w: "30%", c: "var(--accent)" }
+    },
+    {
+      title: "The checkpoint: the janitor's one tidy cleanup",
+      body: "When the stack would cross the line, a rule-following cleanup crew — we call it the janitor — runs once. The instructions are stamped and kept word-for-word. Recent work stays untouched. Old material is trimmed to excerpts, and the oldest of it is folded into a one-paragraph “minutes of the meeting.” The stack drops to about 60% of the limit — but notice the cost spike: this one turn loses the discount, because the conversation changed.",
+      s: 4, meter: { cap: "One full-price turn — then cheap again", w: "34%", c: "var(--warn)" }
+    },
+    {
+      title: "The trade-off you're really choosing",
+      body: "A small budget keeps every message short, but cleanups come often — each one a full-price turn and a fresh chance of trimming something the assistant still needed. A large budget is safer and cache-friendly, but hauls dead weight in every message. There is no free setting; there is a dial.",
+      s: 5, meter: null
+    },
+    {
+      title: "Where all of this lives: the relay",
+      body: "Nothing changes on the engineer's machine. Requests pass through a small relay on their way to the AI — and the janitor from the last steps works inside it. The relay slims each request down, sends it on, and returns the answer untouched. Same editor, same assistant, same answers — the meter just runs on fewer words.",
+      s: 6, meter: null
+    },
+    {
+      title: "The advisor: ask the author what's disposable",
+      body: "The janitor's rules can trim text, but they can't know what still matters. So the relay has a second habit — the advisor: when the conversation nears the limit, it quietly asks the same AI, in the background while the engineer keeps working, “which of these labeled blocks are you finished with?” The answer is a short list of block numbers with reasons. Nobody waits on it, and the question itself rides the discount.",
+      s: 7, meter: null
+    },
+    {
+      title: "Soft delete: tombstones, not shredding",
+      body: "At the next checkpoint, the janitor executes the advisor's list. Each named block becomes a one-line marker — what was removed, and why — and the original is kept in the relay's archive. Nothing is ever paraphrased or rewritten, so nothing can be misremembered. If the assistant needs a removed file after all, it simply reads it again.",
+      s: 8, meter: { cap: "Tombstones cost almost nothing to carry", w: "20%", c: "var(--accent)" }
+    },
+    {
+      title: "Does it work? We tested it head-to-head",
+      body: "Same agent, same 50 real bugs from well-known open-source projects, run twice — with and without compression at half size — and judged by each project's official tests. The compressed agent fixed one more bug, sent 80% fewer words, and cost 27% less in real dollars after every discount was counted.",
+      s: 9, meter: null
+    }
+  ];
+
+  const stage = document.getElementById("stage");
+  const layerStack = document.getElementById("layer-stack");
+  const layerFlow = document.getElementById("layer-flow");
+  const layerResults = document.getElementById("layer-results");
+  const dials = document.getElementById("dials");
+  const stack = document.getElementById("stack");
+  const budget = document.getElementById("budget");
+  const meterWrap = document.getElementById("meterwrap");
+  const meterCap = document.getElementById("meter-cap");
+  const meterFill = document.getElementById("meter-fill");
+  const blocks = { b1: el("b1"), b2: el("b2"), b3: el("b3"), b4: el("b4"), b5: el("b5"), b6: el("b6"), b7: el("b7") };
+  function el(id) { return document.getElementById(id); }
+
+  let i = 0;
+  const dots = document.getElementById("dots");
+  SCENES.forEach((_, k) => {
+    const d = document.createElement("button");
+    d.className = "dot"; d.setAttribute("role", "tab");
+    d.setAttribute("aria-label", "Step " + (k + 1));
+    d.addEventListener("click", () => go(k));
+    dots.appendChild(d);
+  });
+
+  function go(k) {
+    i = Math.max(0, Math.min(SCENES.length - 1, k));
+    const sc = SCENES[i];
+    stage.dataset.s = sc.s;
+    const phase = document.getElementById("sc-phase");
+    if (i <= 2) { phase.textContent = "How it works today"; phase.className = "phase mono today"; }
+    else if (i <= 8) { phase.textContent = "Our method"; phase.className = "phase mono ours"; }
+    else { phase.textContent = "The evidence"; phase.className = "phase mono proof"; }
+    document.getElementById("sc-num").textContent = "Step " + (i + 1);
+    document.getElementById("sc-title").textContent = sc.title;
+    document.getElementById("sc-body").textContent = sc.body;
+    document.getElementById("prev").disabled = i === 0;
+    document.getElementById("next").disabled = i === SCENES.length - 1;
+    [...dots.children].forEach((d, k2) => d.setAttribute("aria-current", k2 === i ? "true" : "false"));
+
+    // layers
+    layerStack.classList.toggle("on", sc.s <= 5 || sc.s === 8);
+    layerFlow.classList.toggle("on", sc.s === 6 || sc.s === 7);
+    layerResults.classList.toggle("on", sc.s === 9);
+    dials.hidden = sc.s !== 5;
+    document.getElementById("panic").hidden = sc.s !== 0;
+    stack.style.display = sc.s === 5 ? "none" : "flex";
+
+    // meter
+    if (sc.meter) {
+      meterWrap.style.opacity = 1;
+      meterCap.textContent = sc.meter.cap;
+      meterFill.style.width = sc.meter.w;
+      meterFill.style.background = sc.meter.c;
+    } else {
+      meterWrap.style.opacity = 0;
+    }
+
+    // stack states
+    budget.style.opacity = (sc.s === 0 || (sc.s >= 3 && sc.s <= 8)) ? 1 : 0;
+    budget.querySelector(".tag").textContent = sc.s === 0 ? "model's hard limit (~1M)" : "our size limit";
+    const cached = sc.s === 2 || sc.s === 3;
+    ["b1","b2","b3","b4","b5","b6"].forEach(id => blocks[id].classList.toggle("cached", cached));
+    // checkpoint (scene 4+): b1-b3 fold into digest; b4 trimmed
+    const post = sc.s >= 4 && sc.s <= 8 && sc.s !== 5;
+    stage.classList.toggle("show-digest", post);
+    ["b1","b2","b3"].forEach(id => blocks[id].classList.toggle("gone", post));
+    blocks.b4.classList.toggle("trim", post && sc.s < 8);
+    // scene 8: advised blocks become tombstones
+    const tomb = sc.s === 8;
+    [["b4","file read removed — superseded (agent's call)"], ["b5","file read removed — task done (agent's call)"]].forEach(([id, txt]) => {
+      const b = blocks[id];
+      b.classList.toggle("tomb", tomb);
+      if (tomb) { b.querySelector(".body-txt").dataset.orig ||= b.querySelector(".body-txt").textContent; b.querySelector(".body-txt").textContent = txt; b.classList.remove("trim"); }
+      else if (b.querySelector(".body-txt").dataset.orig) { b.querySelector(".body-txt").textContent = b.querySelector(".body-txt").dataset.orig; }
+    });
+  }
+
+  document.getElementById("prev").addEventListener("click", () => go(i - 1));
+  document.getElementById("next").addEventListener("click", () => go(i + 1));
+  document.addEventListener("keydown", e => {
+    if (e.key === "ArrowRight") go(i + 1);
+    if (e.key === "ArrowLeft") go(i - 1);
+  });
+  go(0);
+</script>
