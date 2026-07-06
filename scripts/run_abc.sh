@@ -18,18 +18,30 @@ mkdir -p "$DIR"
 echo "### prepull $(date +%F\ %T)"
 bash scripts/prepull.sh "$LIST"
 
+WORKERS="${WORKERS:-4}"
+
 run_one_arm() {  # name port extra-proxy-flags...
   local ARM=$1 PORT=$2; shift 2
-  mkdir -p "$DIR/$ARM"/{sessions,results}
-  echo "### arm $ARM $(date +%F\ %T)"
+  mkdir -p "$DIR/$ARM"/{sessions,results,shards}
+  echo "### arm $ARM $(date +%F\ %T) (workers=$WORKERS)"
   pkill -f "ctxc proxy" 2>/dev/null; sleep 2
   nohup uv run ctxc proxy --upstream https://api.openai.com \
     --record "$DIR/$ARM/sessions" --port "$PORT" "$@" \
     > "$DIR/$ARM/proxy.log" 2>&1 &
   local PROXY_PID=$!
   sleep 5
-  bash scripts/run_arm.sh "$ARM" "$PORT" "$LIST" "$DIR"   # main pass
-  bash scripts/run_arm.sh "$ARM" "$PORT" "$LIST" "$DIR"   # sweep pass
+  # main pass: shard the list round-robin, run shards concurrently. Instances
+  # are independent (own container, own proxy session) and run-batch skips
+  # completed ones, so this parallelizes AND resumes for free.
+  local pids=()
+  for w in $(seq 0 $((WORKERS - 1))); do
+    awk "NR % $WORKERS == $w" "$LIST" > "$DIR/$ARM/shards/s$w.txt"
+    bash scripts/run_arm.sh "$ARM" "$PORT" "$DIR/$ARM/shards/s$w.txt" "$DIR" \
+      > "$DIR/$ARM/shard-$w.log" 2>&1 &
+    pids+=($!)
+  done
+  wait "${pids[@]}"
+  bash scripts/run_arm.sh "$ARM" "$PORT" "$LIST" "$DIR"   # sequential sweep pass
   curl -s "http://localhost:$PORT/stats" > "$DIR/$ARM/proxy-stats.json" || true
   curl -s "http://localhost:$PORT/stats/sessions" > "$DIR/$ARM/proxy-session-stats.json" || true
   kill "$PROXY_PID" 2>/dev/null
